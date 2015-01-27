@@ -26,7 +26,8 @@ import Panic
 
 import Text.PrettyPrint.ANSI.Leijen
 
-import Data.Maybe    (fromMaybe)
+import Debug.Trace   (trace)
+import Data.Maybe    (fromMaybe) 
 import Control.Monad (zipWithM)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -118,8 +119,23 @@ infer' this i j (FI.BLam n f)          = FI.Forall n (\a -> FI.fsubstTT i (FI.TV
 infer' _    _ _ (FI.Fix _ _ _ t1 t)    = FI.Fun t1 t
 infer' this i j (FI.Let _ b e)         = this i (j+1) (e (j, this i j b))
 infer' this i j (FI.LetRec _ ts _ e)   = this i (j+n) (e (zip [j..j+n-1] ts)) where n = length ts
-infer' this i j (FI.App f _)           = t12                where FI.Fun _ t12 = this i j f
-infer' this i j (FI.TApp f t)          = FI.joinType ((unsafeCoerce g :: t -> FI.Type t) t) where FI.Forall _ g  = this i j f
+infer' this i j (FI.App f _)           = t12 where FI.Fun _ t12 = this i j f
+infer' this i j (FI.TApp f t)          = trace printAll oldResult
+  where
+    FI.Forall _ g  = this i j f
+    oldResult      = FI.joinType ((unsafeCoerce g :: t -> FI.Type t) t)
+    newResult      = FI.fsubstTT i t (g i)
+    oldResultInfo  = show (FI.prettyType oldResult)
+    newResultInfo  = show (FI.prettyType newResult)
+    print_g_i      = "g i = " ++ show (FI.prettyType (g i)) ++ "\n"
+    print_t        = "t = " ++ show (FI.prettyType t) ++ "\n"
+    print_newRes   = "New result : " ++ newResultInfo ++ "\n"
+    print_oldRes   = "Old result : " ++ oldResultInfo ++ "\n"
+    print_compare  = "--------<Compare> : " ++ show (oldResultInfo == newResultInfo) ++ "\n"
+    printAll       = concat [print_g_i, print_t, print_newRes, print_oldRes, print_compare]
+-- FI.TApp (f : Expr Index (Index, Type Index)) (t : Type Index) = ...
+-- (this i j f) : Type Index   = Forall _ g
+-- g : Index -> Type Index
 infer' this i j (FI.If _ b1 _)         = this i j b1
 infer' _    _ _ (FI.PrimOp _ op _)     = case op of S.Arith _   -> FI.JClass "java.lang.Integer"
                                                     S.Compare _ -> FI.JClass "java.lang.Boolean"

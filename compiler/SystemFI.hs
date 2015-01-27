@@ -170,7 +170,7 @@ joinType :: Type (Type t) -> Type t
 joinType (TVar n a)       = a
 joinType (JClass c)       = JClass c
 joinType (Fun t1 t2)      = Fun (joinType t1) (joinType t2)
-joinType (Forall n g)     = Forall n (joinType . g . TVar "_") -- Right?
+joinType (Forall n g)     = Forall n (joinType . g . TVar n)
 joinType (Product ts)     = Product (map joinType ts)
 joinType  Unit            = Unit
 joinType (And t1 t2)      = And (joinType t1) (joinType t2)
