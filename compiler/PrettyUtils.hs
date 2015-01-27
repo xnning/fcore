@@ -20,6 +20,8 @@ lambda    = text "\\"
 biglambda = text "/\\"
 dcomma    = text ",,"
 unit      = text "()"
+bar       = text "|"
+evalTo    = text "==>"
 
 bquote :: Doc
 bquote = char '`'
@@ -65,3 +67,15 @@ prettyVarFrom :: Char -> Int -> Doc
 prettyVarFrom c n
   | n < 26    = text [chr (ord c + n)]
   | otherwise = text (c : show n)
+
+intersperseBar :: [Doc] -> Doc
+intersperseBar = foldl1 (\acc x -> acc <$$> bar <+> x)
+
+prependNot :: Doc -> Doc
+prependNot d = text "not" <+> d
+
+combineWithAnd :: Doc -> Doc -> Doc
+combineWithAnd d1 d2 = d1 <+> text "&&" <+> d2
+
+intersperseSpace :: [Doc] -> Doc
+intersperseSpace = hcat . (intersperse space)
