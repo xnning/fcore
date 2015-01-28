@@ -32,7 +32,7 @@ import Control.Monad (zipWithM)
 import Unsafe.Coerce (unsafeCoerce)
 
 simplify :: FI.Expr t e -> Expr t e
-simplify = unsafeCoerce . snd . transExpr 0 0 . unsafeCoerce
+simplify = dedeBruijnExpr 0 [] 0 [] . snd . transExpr 0 0 . unsafeCoerce
 
 transType :: Index -> FI.Type Index -> Type Index
 transType _ (FI.TVar n a)     = TVar n a
@@ -115,16 +115,19 @@ infer' _    _ _ (FI.Lit (S.Bool _))    = FI.JClass "java.lang.Boolean"
 infer' _    _ _ (FI.Lit (S.Char _))    = FI.JClass "java.lang.Character"
 infer' _    _ _ (FI.Lit  S.UnitLit)    = FI.Unit
 infer' this i j (FI.Lam _ t f)         = FI.Fun t (this i (j+1) (f (j,t)))
-infer' this i j (FI.BLam n f)          = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) $ this (i+1) j (f i))
+
+-- infer' this i j (FI.BLam n f)       = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) $ this (i+1) j (f i))
+infer' this i j (FI.BLam n f)          = FI.Forall n (\a -> FI.fsubstTT' (i, n) (FI.TVar n a) $ this (i+1) j (f i))
+
 infer' _    _ _ (FI.Fix _ _ _ t1 t)    = FI.Fun t1 t
 infer' this i j (FI.Let _ b e)         = this i (j+1) (e (j, this i j b))
 infer' this i j (FI.LetRec _ ts _ e)   = this i (j+n) (e (zip [j..j+n-1] ts)) where n = length ts
 infer' this i j (FI.App f _)           = t12 where FI.Fun _ t12 = this i j f
-infer' this i j (FI.TApp f t)          = trace printAll oldResult
+infer' this i j (FI.TApp f t)          = newResult 
   where
-    FI.Forall _ g  = this i j f
-    oldResult      = FI.joinType ((unsafeCoerce g :: t -> FI.Type t) t)
-    newResult      = FI.fsubstTT i t (g i)
+    FI.Forall n g  = this i j f
+    newResult      = FI.fsubstTT' (i, n) t (g i)
+{-  oldResult      = FI.joinType ((unsafeCoerce g :: t -> FI.Type t) t)
     oldResultInfo  = show (FI.prettyType oldResult)
     newResultInfo  = show (FI.prettyType newResult)
     print_g_i      = "g i = " ++ show (FI.prettyType (g i)) ++ "\n"
@@ -133,6 +136,7 @@ infer' this i j (FI.TApp f t)          = trace printAll oldResult
     print_oldRes   = "Old result : " ++ oldResultInfo ++ "\n"
     print_compare  = "--------<Compare> : " ++ show (oldResultInfo == newResultInfo) ++ "\n"
     printAll       = concat [print_g_i, print_t, print_newRes, print_oldRes, print_compare]
+-}
 -- FI.TApp (f : Expr Index (Index, Type Index)) (t : Type Index) = ...
 -- (this i j f) : Type Index   = Forall _ g
 -- g : Index -> Type Index
@@ -287,3 +291,54 @@ force e = App e (Lit S.UnitLit)
 
 const :: Type t -> Expr t e -> Expr t e
 const t e = lam t (Prelude.const e)
+
+dedeBruijnType :: Index -> [t] -> Type Index -> Type t
+dedeBruijnType _ as (TVar n i)      = TVar n (reverse as !! i)
+dedeBruijnType _ _  (JClass c)      = JClass c
+dedeBruijnType i as (Fun t1 t2)     = Fun (dedeBruijnType i as t1) (dedeBruijnType i as t2)
+dedeBruijnType i as (Forall n f)    = Forall n (\a -> dedeBruijnType (i+1) (a:as) (f i))
+dedeBruijnType i as (Product ts)    = Product (map (dedeBruijnType i as) ts)
+dedeBruijnType _ _  (Unit)          = Unit
+dedeBruijnType _ _  (Datatype n ns) = Datatype n ns
+
+dedeBruijnExpr :: Index -> [t] -> Index -> [e] -> Expr Index Index -> Expr t e
+dedeBruijnExpr _ _  _ xs (Var n i)                      = Var n (reverse xs !! i)
+dedeBruijnExpr _ _  _ _  (Lit l)                        = Lit l
+dedeBruijnExpr i as j xs (Lam n t f)                    = Lam n
+                                                            (dedeBruijnType i as t)
+                                                            (\x -> dedeBruijnExpr i as (j+1) (x:xs) (f j))
+dedeBruijnExpr i as j xs (Fix fn pn f t1 t)             = Fix fn pn
+                                                            (\x x1 -> dedeBruijnExpr i as (j+2) (x1:x:xs) (f j (j+1)))
+                                                            (dedeBruijnType i as t1)
+                                                            (dedeBruijnType i as t)
+dedeBruijnExpr i as j xs (Let n e f)                    = Let n
+                                                            (dedeBruijnExpr i as j xs e) 
+                                                            (\x -> dedeBruijnExpr i as (j+1) (x:xs) (f j))
+dedeBruijnExpr i as j xs (LetRec ns ts fs e)            = LetRec ns 
+                                                            (map (dedeBruijnType i as) ts)
+                                                            (\xs' -> map (dedeBruijnExpr i as (j+n) ((reverse xs') ++ xs)) (fs [j..j+n-1]))
+                                                            (\xs' -> dedeBruijnExpr i as (j+n) ((reverse xs') ++ xs) (e [j..j+n-1]))
+                                                            where n = length ts
+dedeBruijnExpr i as j xs (BLam n f)                     = BLam n (\a -> dedeBruijnExpr (i+1) (a:as) j xs (f i))
+dedeBruijnExpr i as j xs (App f x)                      = App
+                                                            (dedeBruijnExpr i as j xs f)
+                                                            (dedeBruijnExpr i as j xs x)
+dedeBruijnExpr i as j xs (TApp f a)                     = TApp
+                                                            (dedeBruijnExpr i as j xs f)
+                                                            (dedeBruijnType i as a)
+dedeBruijnExpr i as j xs (If p b1 b2)                   = If p' b1' b2' where [p',b1',b2'] = map (dedeBruijnExpr i as j xs) [p,b1,b2]
+dedeBruijnExpr i as j xs (PrimOp e1 op e2)              = PrimOp
+                                                            (dedeBruijnExpr i as j xs e1) op
+                                                            (dedeBruijnExpr i as j xs e2)
+dedeBruijnExpr i as j xs (Tuple es)                     = Tuple (map (dedeBruijnExpr i as j xs) es)
+dedeBruijnExpr i as j xs (Proj index e)                 = Proj index (dedeBruijnExpr i as j xs e)
+dedeBruijnExpr i as j xs (JNew c args)                  = JNew c (map (dedeBruijnExpr i as j xs) args)
+dedeBruijnExpr i as j xs (JMethod callee m args r)      = JMethod
+                                                            (fmap (dedeBruijnExpr i as j xs) callee) m
+                                                            (map (dedeBruijnExpr i as j xs) args) r
+dedeBruijnExpr i as j xs (JField callee f r)            = JField (fmap (dedeBruijnExpr i as j xs) callee) f r
+dedeBruijnExpr i as j xs (Seq es)                       = Seq (map (dedeBruijnExpr i as j xs) es)
+dedeBruijnExpr i as j xs (Constr (Constructor n ts) es) = Constr
+                                                            (Constructor n (map (dedeBruijnType i as) ts))
+                                                            (map (dedeBruijnExpr i as j xs) es)
+dedeBruijnExpr i as j xs (Case e alts)                  = Case (dedeBruijnExpr i as j xs e) (map dedeBruijnAlt alts) where dedeBruijnAlt (ConstrAlt (Constructor name ts) names fe) = ConstrAlt (Constructor name (map (dedeBruijnType i as) ts)) names (\xs' -> dedeBruijnExpr i as (j+n) ((reverse xs') ++ xs) (fe [j..j+n-1])) where n = length ts

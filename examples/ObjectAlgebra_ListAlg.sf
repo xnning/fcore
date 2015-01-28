@@ -1,0 +1,22 @@
+type ListAlg A L = {
+  nil : L,
+  cons : A -> L -> L
+};
+type MyList B = {
+  accept : forall C. ListAlg B C -> C
+};
+let nil D : MyList D = {
+  accept = /\E. \(f : ListAlg D E). f.nil
+};
+let cons F (x : F) (xs : MyList F) : MyList F = {
+  accept = /\G. \(f : ListAlg F G). f.cons x (xs.accept G f)
+};
+#let lengthList = /\H. {
+#  nil = 0,
+#  cons = \(x : H). \(y : Int). y + 1
+#};
+let getLen I (xs : MyList I) : Int = xs.accept Int ( {nil = 0, cons = \(x : I). \(y : Int). y + 1} );
+let nilStr : MyList String = nil String;
+let consStr (x : String) (xs : MyList String) = cons String x xs;
+getLen String (consStr "abc" (consStr "def" (consStr "ghi" nilStr)))
+

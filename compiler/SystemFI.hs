@@ -13,6 +13,7 @@ module SystemFI
 --, mapTVar
 --, mapVar
   , fsubstTT
+  , fsubstTT'
   , fsubstTE
   , fsubstEE
   , joinType
@@ -158,6 +159,11 @@ mapVar g h (RecordUpdate e (l1,e1))  = RecordUpdate (mapVar g h e) (l1, mapVar g
 
 fsubstTT :: Eq a => a -> Type a -> Type a -> Type a
 fsubstTT x r = mapTVar (\n a -> if a == x then r else TVar n a)
+
+-- Warning. Temporary solution. Should be replaced.
+-- It checks the propagated names to distinguish variables.
+fsubstTT' :: (Index, Src.ReaderId) -> Type Index -> Type Index -> Type Index
+fsubstTT' (x, name) r = mapTVar (\n a -> if a == x && n == name then r else TVar n a) 
 
 fsubstTE :: Eq t => t -> Type t -> Expr t e -> Expr t e
 fsubstTE x r = mapVar Var (fsubstTT x r)
