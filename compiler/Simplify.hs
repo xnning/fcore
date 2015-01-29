@@ -108,7 +108,7 @@ coerce i d@(FI.Datatype n1 _) (FI.Datatype n2 _) | n1 == n2  = return (lam (tran
 coerce _ _ _ = Nothing
 
 infer' :: Class (Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> FI.Type Index)
-infer' _    _ _ (FI.Var _ (_,t))      = t
+infer' _    i _ (FI.Var n (_,t))       = trace ("In Var: " ++ n ++ " = " ++ show (FI.uglyType t) ++ " i = " ++ show i) t
 infer' _    _ _ (FI.Lit (S.Int _))     = FI.JClass "java.lang.Integer"
 infer' _    _ _ (FI.Lit (S.String _))  = FI.JClass "java.lang.String"
 infer' _    _ _ (FI.Lit (S.Bool _))    = FI.JClass "java.lang.Boolean"
@@ -117,13 +117,13 @@ infer' _    _ _ (FI.Lit  S.UnitLit)    = FI.Unit
 infer' this i j (FI.Lam _ t f)         = FI.Fun t (this i (j+1) (f (j,t)))
 
 -- infer' this i j (FI.BLam n f)       = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) $ this (i+1) j (f i))
-infer' this i j (FI.BLam n f)          = FI.Forall n (\a -> FI.fsubstTT' (i, n) (FI.TVar n a) $ this (i+1) j (f i))
+infer' this i j (FI.BLam n f)          = trace ("In Blam(" ++ n ++ "): " ++ show (FI.uglyType (FI.Forall n (\a -> FI.fsubstTT' (i, n) (FI.TVar n a) $ this (i+1) j (f i)))) ++ " i = " ++ show i) $ FI.Forall n (\a -> FI.fsubstTT' (i, n) (FI.TVar n a) $ this (i+1) j (f i))
 
 infer' _    _ _ (FI.Fix _ _ _ t1 t)    = FI.Fun t1 t
 infer' this i j (FI.Let _ b e)         = this i (j+1) (e (j, this i j b))
 infer' this i j (FI.LetRec _ ts _ e)   = this i (j+n) (e (zip [j..j+n-1] ts)) where n = length ts
 infer' this i j (FI.App f _)           = t12 where FI.Fun _ t12 = this i j f
-infer' this i j (FI.TApp f t)          = newResult 
+infer' this i j (FI.TApp f t)          = trace ("In TApp(" ++ n ++ " -> " ++ show (FI.uglyType t) ++ "): i = " ++ show i) newResult 
   where
     FI.Forall n g  = this i j f
     newResult      = FI.fsubstTT' (i, n) t (g i)

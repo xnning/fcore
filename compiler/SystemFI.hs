@@ -18,7 +18,9 @@ module SystemFI
   , fsubstEE
   , joinType
   , prettyType
+  , uglyType
   , prettyExpr
+  , uglyExpr
   ) where
 
 import qualified Src
@@ -341,3 +343,64 @@ prettyExpr' p (i,j) (Case e alts) =
               let n = length ns
                   ids = [j..j+n-1]
               in intersperseSpace (text (constrName c) : map prettyVar ids) <+> arrow <+> prettyExpr' p (i, j+n) (es ids)
+
+
+catSpace :: [String] -> String -> String
+catSpace []     _ = ""
+catSpace [x]    _ = x
+catSpace (x:xs) s = x ++ s ++ catSpace xs s
+
+-- Ugly printer.
+
+enc :: [String] -> [String] -> String
+enc a b = "[" ++ (catSpace a " ") ++ "|" ++ (catSpace b " ") ++ "]"
+
+enc2 :: [String] -> [String] -> String
+enc2 a b = "[" ++ (catSpace a " ") ++ "|" ++ (catSpace b ",") ++ "]"
+
+uglyType :: Type Index -> Doc
+uglyType = text . printType 0
+
+printType :: Int -> Type Int -> String
+printType _ (TVar n a) = enc ["TVar"] [n]
+printType _ (Datatype n _) = enc ["Datatype"] [n]
+printType i (Fun t1 t2) = enc ["Fun"] [printType i t1, "->", printType i t2]
+printType i (Forall n f) = enc ["Forall", n] [printType (succ i) (f i)]
+printType i (Product ts) = enc2 ["Product"] $ map (printType i) ts
+printType _  Unit = "Unit"
+printType _ (JClass "java.lang.Integer") = "Int"
+printType _ (JClass "java.lang.String") = "String"
+printType _ (JClass "java.lang.Boolean") = "Bool"
+printType _ (JClass "java.lang.Character") = "Char"
+printType _ (JClass c) = enc ["JClass"] [c]
+printType i (And t1 t2) = enc ["And"] [printType i t1, ",,", printType i t2]
+printType i (Record (l,t)) = enc ["Record", l] [printType i t]
+
+uglyExpr :: Expr Int Int -> Doc
+uglyExpr = text . printExpr 0 0
+
+printExpr :: Int -> Int -> Expr Int Int -> String
+printExpr i j (Var n _) = enc ["Var"] [n] 
+printExpr i j (Lam n t f) = enc ["Lam", n, ":", printType i t] [printExpr i (succ j) (f j)]
+printExpr i j (App e1 e2) = enc ["App"]  [printExpr i j e1, "apply", printExpr i j e2]
+printExpr i j (BLam n f) = enc ["BLam", n] [printExpr (succ i) j (f i)]
+printExpr i j (TApp e t) = enc ["TApp"] [printExpr i j e, "apply", printType i t]
+printExpr i j all@(Lit _) = show . prettyExpr' basePrec (i, j) $ all
+printExpr i j (If e1 e2 e3) = enc ["If"] ["if", printExpr i j e1, "then", printExpr i j e2, "else", printExpr i j  e3]
+printExpr i j (PrimOp e1 op e2) = "(" ++ printExpr i j e1 ++ " " ++ print_op ++ " "  ++ ")"
+  where
+    print_op = Language.Java.Pretty.prettyPrint java_op
+    java_op  = case op of
+                 Src.Arith   op' -> op'
+                 Src.Compare op' -> op'
+                 Src.Logic   op' -> op'
+printExpr i j (Tuple es) = enc2 ["Tuple"] $ map (printExpr i j) es 
+printExpr i j (Proj n e) = enc ["Proj", printExpr i j e] ["._", show n]
+printExpr i j (Seq es) = enc2 ["Seq"] $ map (printExpr i j) es
+printExpr i j (Let n b e) = enc ["Let",n,"="] [printExpr i (succ j) b, "\nin", printExpr i (succ j) (e j)] 
+printExpr i j (Merge e1 e2) = enc ["Merge"] [printExpr i j e1, ",,", printExpr i j e2]
+printExpr i j (RecordIntro (l, e)) = enc ["RecordIntro"] [show (lbrace <+> text l <+> equals <+> text (printExpr i j e) <+> rbrace)]
+printExpr i j (RecordElim e l) = enc ["RecordElim"] [printExpr i j e ++ "." ++ l]
+printExpr i j (RecordUpdate e (l, e1)) = enc ["RecordUpdate"] [show (text (printExpr i j e) <+> text "with" <+> text (printExpr i j (RecordIntro (l, e1))))]
+printExpr i j _ = "Oops"
+
