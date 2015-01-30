@@ -404,3 +404,52 @@ printExpr i j (RecordElim e l) = enc ["RecordElim"] [printExpr i j e ++ "." ++ l
 printExpr i j (RecordUpdate e (l, e1)) = enc ["RecordUpdate"] [show (text (printExpr i j e) <+> text "with" <+> text (printExpr i j (RecordIntro (l, e1))))]
 printExpr i j _ = "Oops"
 
+
+genNameType :: Index -> String -> (Src.ReaderId -> Src.ReaderId) -> Type Index -> Type Index
+genNameType i info h (TVar n a) = 
+genNameType i info h (JClass c) = 
+genNameType i info h (Fun t1 t2) = 
+genNameType i info h (Forall n f) = 
+genNameType i info h (Product ts) = 
+genNameType i info h  Unit = 
+genNameType i info h (And t1 t2) = 
+genNameType i info h (Record (l,t)) = 
+genNameType i info h (Datatype _ _) = 
+
+genName :: Index -> String -> (String -> String) -> Expr Index Index -> Expr Index Index
+genName i info h all@(Var n a) = all
+genName i info h all@(Lit n) = all
+genName i info h (Lam n t f) = Lam n (genNameType i info h t) (genName i info h . f) 
+genName i info h (BLam n f) = BLam (n ++ info ++ show i) (genName (succ i) (\x -> if x == n then n ++ info ++ show i else h x) . f) 
+genName i info h (Fix n1 n2 f t1 t) = Fix n1 n2 (genName i info h) (genNameType i info h t1) (genNameType i info h t) 
+genName i info h (Let n b e) = Let n (genName i ('a':info) h b) (genName i ('b':info) h . e)
+genName i info h (LetRec ns ts bs e) = LetRec ns (map (genNameType i info h) ts) bs' e'
+  where
+    bs' args = zipWith (\a b -> genName i ("<" ++ show a ++ ">" ++ info) h b) [1..n] (bs args)
+    n  = length (bs args)
+    e' = (genName i ("<0>" ++ info) h . e) 
+genName i info h (Constr (Constructor n ts) es) = Constr (Constructor n (map (genNameType i info h) ts)) (zipWith (\a b -> genName i ("<" ++ show a ++ ">" ++ info) h b) [1..n] es) where n = length es
+-- Bug?! Names in datatype can be equal to info.
+genName i info h (Case e alts) = Case (genName i ("<0>" ++ info) h e) alts'
+  where
+    alts' = zipWith (\a b -> mapAlt a alt) [1..n] alts
+    mapAlt a (ConstrAlt (Constructor n0 ts0) names0 f0) = ConstrAlt (Constructor n0 (map (genNameType i info h) ts0)) names0 (genName i ("<" ++ show a ++ ">" ++ info) h . f0)
+    n     = length alts
+genName i info h (App f e) = App (genName i ('a':info) h f) (genName i ('b':info) h e) 
+genName i info h (TApp f t) = TApp (genName i info h f) (genNameType i info h t) 
+genName i info h (If p b1 b2) = If (genName i ('a':info) h p) (genName i ('b':info) h b1) (genName i ('c':info) h b2)
+genName i info h (PrimOp e1 op e2) = PrimOp (genName i ('a':info) h e1) op (genName i ('b':info) h e2)
+genName i info h (Tuple es) = Tuple $ zipWith (\a b -> genName i ("<" ++ show a ++ ">" ++ info) h b) [1..n] es where n = length es
+genName i info h (Proj i e) = Proj i (genName i info h e)
+genName i info h (JNew c args) = JNew c $ zipWith (\a b -> genName i ("<" ++ show a ++ ">" ++ info) h b) [1..n] args where n = length args
+genName i info h (JMethod callee m args c) = JMethod (fmap (genName i ("<0>" ++ info) h) callee) m args' c
+  where
+    args' = zipWith (\a b -> genName i ("<" ++ show a ++ ">" ++ info) h b) [1..n] args 
+    n     = length args
+genName i info h (JField callee f c) = JField (fmap (genName i info h) callee) f c
+genName i info h (Seq es) = Seq $ zipWith (\a b -> genName i ("<" ++ show a ++ ">" ++ info) h b) [1..n] es where n = length es
+genName i info h (Merge e1 e2) = Merge (genName i ('a':info) h e1) (genName i ('b':info) h e2)
+genName i info h (RecordIntro (l,e)) = RecordIntro (l, genName i info h e)
+genName i info h (RecordElim e l) =  RecordElim (genName i info h e) l
+genName i info h (RecordUpdate e (l1,e1)) = RecordUpdate (genName i ('a':info) h e) (l1, genName i ('b':info) h e1)
+
