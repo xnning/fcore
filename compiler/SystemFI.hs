@@ -167,6 +167,8 @@ fsubstTT x r = mapTVar (\n a -> if a == x then r else TVar n a)
 -- It checks the propagated names to distinguish variables.
 fsubstTT' :: (Index, Src.ReaderId) -> Type Index -> Type Index -> Type Index
 fsubstTT' (x, name) r = mapTVar (\n a -> if a == x && n == name then r else TVar n a) 
+-- Here: Should remove redundant "#"s in name.
+
 
 fsubstTE :: Eq t => t -> Type t -> Expr t e -> Expr t e
 fsubstTE x r = mapVar Var (fsubstTT x r)

@@ -28,12 +28,12 @@ type TVarMap t  = Map.Map ReaderId t
 type VarMap t e = Map.Map ReaderId (F.Expr t e)
 
 transType :: TVarMap t -> ReaderType -> F.Type t
-transType d (TVar a)     = F.TVar a (fromMaybe (panic ("Desugar.transType: " ++ show (TVar a))) (Map.lookup a d))
+transType d (TVar a)     = F.TVar (a ++ "#") (fromMaybe (panic ("Desugar.transType: " ++ show (TVar a))) (Map.lookup a d))
 transType _ (JType (JClass c)) = F.JClass c
 transType _ (JType (JPrim c))  = F.JClass c
 transType d (Fun t1 t2)  = F.Fun (transType d t1) (transType d t2)
 transType d (Product ts) = F.Product (map (transType d) ts)
-transType d (Forall a t) = F.Forall a (\a' -> transType (Map.insert a a' d) t)
+transType d (Forall a t) = F.Forall (a ++ "#") (\a' -> transType (Map.insert a a' d) t)
 transType d (And t1 t2)  = F.And (transType d t1) (transType d t2)
 transType d (Record fs)  =
                 case fs  of
@@ -55,10 +55,10 @@ desugarExpr (d, g) = go
     go (Proj e i)        = F.Proj i (go e)
     go (PrimOp e1 op e2) = F.PrimOp (go e1) op (go e2)
     go (If e1 e2 e3)     = F.If (go e1) (go e2) (go e3)
-    go (Lam (x, t) e)    = F.Lam x
+    go (Lam (x, t) e)    = F.Lam (x ++ "#")
                                (transType d t)
-                               (\x' -> desugarExpr (d, Map.insert x (F.Var x x') g) e)
-    go (BLam a e)        = F.BLam a (\a' -> desugarExpr (Map.insert a a' d, g) e)
+                               (\x' -> desugarExpr (d, Map.insert x (F.Var (x ++ "#") x') g) e)
+    go (BLam a e)        = F.BLam (a ++ "#") (\a' -> desugarExpr (Map.insert a a' d, g) e)
     go Let{..}           = panic "Desugar.desugarExpr: Let"
     go (LetOut _ [] e)   = go e
     go (Merge e1 e2)     = F.Merge (go e1) (go e2)
@@ -77,7 +77,7 @@ desugarExpr (d, g) = go
       -- F.App
       --   (F.Lam (transType d t1) (\f1' -> desugarExpr (d, Map.insert f1 (F.Var f1') g) e))
       --   (go e1)
-      F.Let f1 (go e1) (\f1' -> desugarExpr (d, Map.insert f1 (F.Var f1 f1') g) e)
+      F.Let (f1 ++ "#") (go e1) (\f1' -> desugarExpr (d, Map.insert f1 (F.Var (f1 ++ "#") f1') g) e)
 
 {-
 Note that rewriting simultaneous let expressions by nesting is wrong unless we do
@@ -93,7 +93,7 @@ variable renaming. An example:
 ~> let y = (t1, ..., tn). (e1, ..., en) in e[*]
 -}
     go (LetOut NonRec bs@(_:_) e) =
-      F.Let (intercalate "_" fs)
+      F.Let ((intercalate "_" fs) ++ "#")
         (go tupled_es)
         (\y -> desugarExpr (d, g' y `Map.union` g) e)
         where
@@ -103,7 +103,7 @@ variable renaming. An example:
 
           -- Substitution: fi -> y._(i-1)
           g' y = Map.fromList $ -- `Map.fromList` is right-biased.
-                   zipWith (\f i -> (f, F.Proj i (F.Var f y)))
+                   zipWith (\f i -> (f, F.Proj i (F.Var (f ++ "#") y)))
                            fs
                            [1..length bs]
 
@@ -147,16 +147,16 @@ Conclusion: this rewriting cannot allow type variables in the RHS of the binding
     desugarConstructor (Constructor n ts) = F.Constructor n (map (transType d) ts)
     desugarAlts (ConstrAlt c ns e) =
         let c' = desugarConstructor c
-            f ns' = desugarExpr (d, zipWith (\n e' -> (n, F.Var n e')) ns ns' `addToVarMap` g) e
+            f ns' = desugarExpr (d, zipWith (\n e' -> (n, F.Var (n ++ "#") e')) ns ns' `addToVarMap` g) e
         in F.ConstrAlt c' ns f
 desugarLetRecToFix :: (TVarMap t, VarMap t e) -> CheckedExpr -> F.Expr t e
 desugarLetRecToFix (d,g) (LetOut Rec [(f,t,e)] body) =
   F.App
-      (F.Lam f
+      (F.Lam (f ++ "#")
           (transType d t)
-          (\f' -> desugarExpr (d, addToEnv [(f, F.Var f f')] g) body))
-      (F.Fix f x1
-          (\f' x1' -> desugarExpr (d, addToEnv [(f, F.Var f f'), (x1, F.Var x1 x1')] g) peeled_e)
+          (\f' -> desugarExpr (d, addToEnv [(f, F.Var (f ++ "#") f')] g) body))
+      (F.Fix (f ++ "#") (x1 ++ "#")
+          (\f' x1' -> desugarExpr (d, addToEnv [(f, F.Var (f ++ "#") f'), (x1, F.Var (x1 ++ "#") x1')] g) peeled_e)
           (transType d t1)
           (transType d t2))
           where
@@ -207,10 +207,10 @@ desugarLetRecToLetRec :: (TVarMap t, VarMap t e) -> CheckedExpr -> F.Expr t e
 desugarLetRecToLetRec (d,g) (LetOut Rec binds@(_:_) body) = F.LetRec names' sigs' binds' body'
   where
     (ids, sigs, defs) = unzip3 binds
-    names'            = ids
+    names'            = map (++"#") ids
     sigs'             = map (transType d) sigs
-    binds' ids'       = map (desugarExpr (d, zipWith (\f f' -> (f, F.Var f f')) ids ids' `addToVarMap` g)) defs
-    body'  ids'       = desugarExpr (d, zipWith (\f f' -> (f, F.Var f f')) ids ids' `addToVarMap` g) body
+    binds' ids'       = map (desugarExpr (d, zipWith (\f f' -> (f, F.Var (f ++ "#") f')) ids ids' `addToVarMap` g)) defs
+    body'  ids'       = desugarExpr (d, zipWith (\f f' -> (f, F.Var (f ++ "#") f')) ids ids' `addToVarMap` g) body
 
 desugarLetRecToLetRec _ _ = panic "Desugar.desugarLetRecToLetRec"
 
