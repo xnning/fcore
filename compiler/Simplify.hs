@@ -1,344 +1,175 @@
--- The simplifier: translate System F with intersection types to vanilla System F
-
-{-# LANGUAGE TypeOperators, FlexibleInstances, MultiParamTypeClasses #-}
-{-# OPTIONS_GHC -Wall #-}
-
-module Simplify
-  ( simplify
-  , transType
-  , subtype'
-  , subtype
-  , coerce
-  , infer'
-  , infer
-  , transExpr'
-  , transExpr
-  , getter
-  , putter
-  ) where
+module Simplify where
 
 import Core
-import qualified SystemFI    as FI
-import qualified Src         as S
-
-import Mixin
 import Panic
+import qualified SystemFI             as FI
+import qualified Src                  as S
+import qualified Language.Java.Syntax as J
 
 import Text.PrettyPrint.ANSI.Leijen
 
 import Debug.Trace   (trace)
-import Data.Maybe    (fromMaybe) 
-import Control.Monad (zipWithM)
+import Data.Maybe    (fromMaybe)
 import Unsafe.Coerce (unsafeCoerce)
 
-simplify :: FI.Expr t e -> Expr t e
-simplify = dedeBruijnExpr 0 [] 0 [] . snd . transExpr 0 0 . unsafeCoerce . FI.genName 0 "" (\x -> "") . unsafeCoerce
-
-transType :: Index -> FI.Type Index -> Type Index
-transType _ (FI.TVar n a)     = TVar n a
-transType _ (FI.JClass c)     = JClass c
-transType i (FI.Fun a1 a2)    = Fun (transType i a1) (transType i a2)
-transType i (FI.Forall n f)   = Forall n (\a -> transType (i + 1) $ FI.fsubstTT i (FI.TVar n a) (f i))
-transType i (FI.Product ts)   = Product (map (transType i) ts)
-transType _  FI.Unit          = Unit
-transType i (FI.And a1 a2)    = Product [transType i a1, transType i a2]
-transType i (FI.Record (_,t)) = transType i t
-transType _ (FI.Datatype n ns) = Datatype n ns
-
--- Subtyping
--- For SystemFI.
-subtype' :: Class (Index -> FI.Type Index -> FI.Type Index -> Bool)
-subtype' _    _ (FI.TVar _ a)   (FI.TVar _ b)   = a == b
-subtype' _    _ (FI.JClass c)   (FI.JClass d)   = c == d
-subtype' this i (FI.Fun t1 t2)  (FI.Fun t3 t4)  = this i t3 t1 && this i t2 t4
-subtype' this i (FI.Forall _ f) (FI.Forall _ g) = this (i+1) (f i) (g i)
-subtype' this i (FI.Product ss) (FI.Product ts)
-  | length ss /= length ts                    = False
-  | otherwise                                 = uncurry (this i) `all` zip ss ts
-subtype' _    _  FI.Unit         FI.Unit        = True
-subtype' this i  t1            (FI.And t2 t3)  = this i t1 t2 && this i t1 t3
-subtype' this i (FI.And t1 t2) t3              = this i t1 t3 || this i t2 t3
-subtype' this i (FI.Record (l1,t1)) (FI.Record (l2,t2))
-  | l1 == l2                                  = this i t1 t2
-  | otherwise                                 = False
-subtype' _ _ (FI.Datatype n1 _) (FI.Datatype n2 _)  = n1 == n2 -- TODO
-subtype' _    _  _              _             = False
-
-subtype :: Index -> FI.Type Index -> FI.Type Index -> Bool
-subtype = new subtype'
-
-type Coercion t e = Expr t e
-
-coerce :: Index -> FI.Type Index -> FI.Type Index -> Maybe (Coercion Index Index)
-coerce i (FI.TVar n a) (FI.TVar _ b) | a == b    = return (lam (transType i (FI.TVar n a)) var)
-                                   | otherwise = Nothing
-coerce i (FI.JClass c) (FI.JClass d) | c == d    = return (lam (transType i (FI.JClass c)) var)
-                                   | otherwise = Nothing
-coerce i (FI.Fun t1 t2) (FI.Fun t3 t4) =
-  do c1 <- coerce i t3 t1
-     c2 <- coerce i t2 t4
-     return (lam (transType i (FI.Fun t1 t2))
-                 (\f -> lam (transType i t3) ((App c2 .  App (var f) . App c1) . var)))
-coerce i (FI.Forall n f) (FI.Forall _ g) =
-  do c <- coerce (i + 1) (f i) (g i)
-     return (lam (transType i (FI.Forall n f)) (\f' -> bLam ((App c . TApp (var f')) . TVar "")))
-coerce i (FI.Product ss) (FI.Product ts)
-  | length ss /= length ts = Nothing
-  | otherwise =
-    do cs <- zipWithM (coerce i) ss ts
-       let f x = Tuple (zipWith (\c idx -> App c (Proj idx x))
-                                 cs [1..length ss])
-       return (lam (transType i (FI.Product ss)) (f . var))
-coerce i FI.Unit FI.Unit = return (lam (transType i FI.Unit) var)
-coerce i t1 (FI.And t2 t3) =
-  do c1 <- coerce i t1 t2
-     c2 <- coerce i t1 t3
-     return (lam (transType i t1) (\x -> Tuple [App c1 (var x), App c2 (var x)]))
-coerce i (FI.And t1 t2) t3 =
-  case coerce i t1 t3 of
-    Just c  -> Just (lam (transType i (FI.And t1 t2)) (App c . Proj 1 . var))
-    Nothing ->
-      case coerce i t2 t3 of
-        Nothing -> Nothing
-        Just c  -> return (lam (transType i (FI.And t1 t2)) (App c . Proj 2 . var))
-coerce i (FI.Record (l1,t1)) (FI.Record (l2,t2)) | l1 == l2  = coerce i t1 t2
-                                               | otherwise = Nothing
-coerce i d@(FI.Datatype n1 _) (FI.Datatype n2 _) | n1 == n2  = return (lam (transType i d) var)
-                                               | otherwise = Nothing
-coerce _ _ _ = Nothing
-
-infer' :: Class (Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> FI.Type Index)
-infer' _    i _ (FI.Var n (_,t))       = t
-infer' _    _ _ (FI.Lit (S.Int _))     = FI.JClass "java.lang.Integer"
-infer' _    _ _ (FI.Lit (S.String _))  = FI.JClass "java.lang.String"
-infer' _    _ _ (FI.Lit (S.Bool _))    = FI.JClass "java.lang.Boolean"
-infer' _    _ _ (FI.Lit (S.Char _))    = FI.JClass "java.lang.Character"
-infer' _    _ _ (FI.Lit  S.UnitLit)    = FI.Unit
-infer' this i j (FI.Lam _ t f)         = FI.Fun t (this i (j+1) (f (j,t)))
-
--- infer' this i j (FI.BLam n f)       = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) $ this (i+1) j (f i))
-infer' this i j (FI.BLam n f)          = FI.Forall n (\a -> FI.fsubstTT' (i, n) (FI.TVar n a) $ this (i+1) j (f i))
-
-infer' _    _ _ (FI.Fix _ _ _ t1 t)    = FI.Fun t1 t
-infer' this i j (FI.Let _ b e)         = this i (j+1) (e (j, this i j b))
-infer' this i j (FI.LetRec _ ts _ e)   = this i (j+n) (e (zip [j..j+n-1] ts)) where n = length ts
-infer' this i j (FI.App f _)           = t12 where FI.Fun _ t12 = this i j f
-infer' this i j (FI.TApp f t)          = newResult 
-  where
-    FI.Forall n g  = this i j f
-    newResult      = FI.fsubstTT' (i, n) t (g i)
-{-  oldResult      = FI.joinType ((unsafeCoerce g :: t -> FI.Type t) t)
-    oldResultInfo  = show (FI.prettyType oldResult)
-    newResultInfo  = show (FI.prettyType newResult)
-    print_g_i      = "g i = " ++ show (FI.prettyType (g i)) ++ "\n"
-    print_t        = "t = " ++ show (FI.prettyType t) ++ "\n"
-    print_newRes   = "New result : " ++ newResultInfo ++ "\n"
-    print_oldRes   = "Old result : " ++ oldResultInfo ++ "\n"
-    print_compare  = "--------<Compare> : " ++ show (oldResultInfo == newResultInfo) ++ "\n"
-    printAll       = concat [print_g_i, print_t, print_newRes, print_oldRes, print_compare]
--}
--- FI.TApp (f : Expr Index (Index, Type Index)) (t : Type Index) = ...
--- (this i j f) : Type Index   = Forall _ g
--- g : Index -> Type Index
-infer' this i j (FI.If _ b1 _)         = this i j b1
-infer' _    _ _ (FI.PrimOp _ op _)     = case op of S.Arith _   -> FI.JClass "java.lang.Integer"
-                                                    S.Compare _ -> FI.JClass "java.lang.Boolean"
-                                                    S.Logic _   -> FI.JClass "java.lang.Boolean"
-infer' this i j (FI.Tuple es)          = FI.Product (map (this i j) es)
-infer' this i j (FI.Proj index e)      = ts !! (index-1) where FI.Product ts = this i j e
-infer' _    _ _ (FI.JNew c _)          = FI.JClass c
-infer' _    _ _ (FI.JMethod _ _ _ c)   = FI.JClass c
-infer' _    _ _ (FI.JField _ _ c)      = FI.JClass c
-infer' this i j (FI.Seq es)            = this i j (last es)
-infer' this i j (FI.Merge e1 e2)       = FI.And (this i j e1) (this i j e2)
-infer' this i j (FI.RecordIntro (l,e)) = FI.Record (l, this i j e)
-infer' this i j (FI.RecordElim e l1)   = t1 where Just (t1,_) = getter i j (this i j e) l1
-infer' this i j (FI.RecordUpdate e _)  = this i j e
-infer' this i j (FI.Case _ alts)       = inferAlt $ head alts
-    where inferAlt (FI.ConstrAlt c _ e)  =
-              let ts = FI.constrParams c
-                  n = length ts
-              in this i (j+n) (e (zip [j..j+n-1] ts))
-infer' _ _ _ (FI.Constr c _)           = last $ FI.constrParams c
+simplify :: FI.Expr Index (Index, FI.Type Index) -> Expr Index Index
+simplify = transExpr 0 0
 
 infer :: Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> FI.Type Index
-infer = new infer'
+infer i j (FI.Var _ (_, t)) = t
+infer i j (FI.Lit (S.Int    _)) = FI.JClass "java.lang.Integer"
+infer i j (FI.Lit (S.String _)) = FI.JClass "java.lang.String"
+infer i j (FI.Lit (S.Bool   _)) = FI.JClass "java.lang.Boolean"
+infer i j (FI.Lit (S.Char   _)) = FI.JClass "java.lang.Character"
+infer i j (FI.Lam n t f) = FI.Fun t $ infer i (j + 1) (f (j, t))
+infer i j (FI.Fix _ _ _ t1 t) = FI.Fun t1 t
+infer i j (FI.Let _ b f) = infer i (j + 1) $ f (j, infer i j b)
+infer i j (FI.LetRec _ ts _ e) = infer i (j + n) $ e (zip [j..j+n-1] ts)
+  where n = length ts
+infer i j (FI.BLam n f) = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) . infer (i + 1) j $ f i)
+infer i j (FI.App f x) = t where FI.Fun _ t = infer i j f
+--infer i j FI.TApp ?=
+infer i j (FI.If _ e _) = infer i j e
+infer i j (FI.PrimOp _ op _) = case op of S.Arith   _ -> FI.JClass "java.lang.Integer"
+                                          S.Compare _ -> FI.JClass "java.lang.Boolean"
+                                          S.Logic   _ -> FI.JClass "java.lang.Boolean" 
+--infer i j FI.Tuple ?=
+--infer i j FI.Proj ?=
+--infer i j FI.JNew ?=
+--infer i j FI.JMethod ?=
+--infer i j FI.JField ?=
+--infer i j FI.PolyList ?=
+--infer i j FI.JProxyCall ?=
+--infer i j FI.Seq ?=
+--infer i j FI.Merge ?=
+--infer i j FI.RecordIntro ?=
+--infer i j FI.RecordElim ?=
+--infer i j FI.RecordUpdate ?=
+--infer i j FI.Constr ?=
+--infer i j FI.Case ?=
+infer _ _ _ = trace "Wrong1" FI.Unit
 
-instance (FI.Type Index, Expr Index Index) <: FI.Type Index where
-  up = fst
-
-transExpr'
-  :: (Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> FI.Type Index)
-  -> (Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> (FI.Type Index, Expr Index Index))
-  -> Index  -> Index -> FI.Expr Index (Index, FI.Type Index) -> Expr Index Index
-transExpr' _ _    _ _ (FI.Var n (x,_))      = Var n x
-transExpr' _ _    _ _ (FI.Lit l)            = Lit l
-transExpr' _ this i j (FI.Lam n t f)        = Lam n (transType i t) (\x -> fsubstEE j (Var n x) body')    where (_, body') = this i (j+1) (f (j, t))
-transExpr' _ this i j (FI.BLam n f)         = BLam n (\a -> fsubstTE i (TVar n a) body')               where (_, body') = this (i+1) j (f i)
-transExpr' _ this i j (FI.Fix n1 n2 f t1 t) = Fix n1 n2 (\x x1 -> (fsubstEE j (Var n1 x) . fsubstEE (j+1) (Var n2 x1)) body') t1' t'
+transExpr :: Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> Expr Index Index
+transExpr i j (FI.Var n (x, _)) = Var n x
+transExpr i j (FI.Lit l) = Lit l
+transExpr i j (FI.Lam n t f) = Lam n (transType i t) (\x -> fsubstEE j (Var n x) . transExpr i (j + 1) $ f (j, t)) -- why feed f with j before subst, not x directly?
+transExpr i j this@(FI.Fix fn pn e t1 t) = Fix fn pn e' t1' t' 
   where
-    (_, body') = this i (j+2) (f (j, FI.Fun t1 t) (j+1, t1))
-    t1'        = transType i t1
-    t'         = transType i t
-transExpr' super this i j (FI.Let n b e) = Let n b' (\x -> fsubstEE j (Var n x) (snd (this i (j+1) (e (j, super i j b)))))
+    body = transExpr i (j + 2) $ e (j, infer i j this) (j + 1, t1)
+    e'   = \x x1 -> fsubstEE j (Var fn x) . fsubstEE (j + 1) (Var pn x1) $ body
+    t1'  = transType i t1
+    t'   = transType i t
+transExpr i j (FI.Let n b f) = Let n (transExpr i j b) (\x -> fsubstEE j (Var n x) . transExpr i (j + 1) $ f (j, infer i j b))
+transExpr i j (FI.LetRec ns ts bs e) = LetRec ns ts' bs' e'
   where
-    (_,b') = this i j b
-transExpr' _     this i j (FI.LetRec ns ts bs e) = LetRec ns' ts' bs' e'
-  where
-    ts'           = map (transType i) ts
-    ns'           = ns
-    bs' fs'       = map (subst fs fs') bs_body'
-    e'  fs'       = subst fs fs' e_body'
-    (_, bs_body') = unzip (map (transExpr i (j+n)) (bs fs_with_ts))
-    (_, e_body')  = this i (j+n) (e fs_with_ts)
-    fs            = [j..j+n-1]
-    fs_with_ts    = zip fs ts
-    n             = length ts
-    subst :: [Index] -> [Index] -> Expr Index Index -> Expr Index Index
-    subst xs rs   = foldl (.) id [fsubstEE x (Var (ns' !! k) (rs !! k)) | (x,k) <- zip xs [0..n-1]] -- right?
+    ts' = map (transType i) ts
+    bs' args = map (subst args . trans) . bs $ fs_ts
+    e'  args = subst args . trans . e $ fs_ts  
+    n = length ts
+    fs_ts = zip [j..j+n-1] ts
+    trans = transExpr i (j + n)
+    subst :: [Index] -> Expr Index Index -> Expr Index Index
+    subst rs = foldl (.) id [ fsubstEE x (Var (ns !! k) (rs !! k)) | (x, k) <- zip [j..j+n-1] [0..n-1] ]
+transExpr i j (FI.BLam n f) = BLam n (\a -> fsubstTE i (TVar n a) . transExpr (i + 1) j $ f i)
+transExpr i j (FI.App f x) =
+  let (FI.Fun t1 t2, e1) = (infer i j f, transExpr i j f)
+      (t3, e2)           = (infer i j x, transExpr i j x)
+      panic_doc          = text "Coercion failed" <$>
+                           text "Function: " <> pretty_typing f (FI.Fun t1 t2) <$>
+                           text "Argument: " <> pretty_typing x t3 <$>
+                           text "Coercion: " <> pretty_coercion t3 t1
+      pretty_typing temp1 temp2   = FI.prettyExpr (unsafeCoerce temp1 :: FI.Expr Index Index) <+> colon <+>
+                                    FI.prettyType (unsafeCoerce temp2 :: FI.Type Index)
+      pretty_coercion temp1 temp2 = FI.prettyType (unsafeCoerce temp1 :: FI.Type Index) <+> text "<:" <+>
+                                    FI.prettyType (unsafeCoerce temp2 :: FI.Type Index)
+  in let c = fromMaybe (prettyPanic "Simplify.transExpr" panic_doc) (coerce i t3 t1)
+     in App e1 (App c e2)
+--transExpr i j FI.TApp ?=
+transExpr i j (FI.If e1 e2 e3) = If e1' e2' e3'
+  where [e1', e2', e3'] = map (transExpr i j) [e1, e2, e3]
+transExpr i j (FI.PrimOp e1 op e2) = PrimOp (transExpr i j e1) op (transExpr i j e2)
+--transExpr i j FI.Tuple ?=
+--transExpr i j FI.Proj ?=
+--transExpr i j FI.JNew ?=
+--transExpr i j FI.JMethod ?=
+--transExpr i j FI.JField ?=
+--transExpr i j FI.PolyList ?=
+--transExpr i j FI.JProxyCall ?=
+--transExpr i j FI.Seq ?=
+--transExpr i j FI.Merge ?=
+--transExpr i j FI.RecordIntro ?=
+--transExpr i j FI.RecordElim ?=
+--transExpr i j FI.RecordUpdate ?=
+--transExpr i j FI.Constr ?=
+--transExpr i j FI.Case ?=
+transExpr _ _ _ = trace "Wrong2" (Var "" (-1))
 
-transExpr' _ this i j (FI.App e1 e2)
-  = let (FI.Fun t11 t12, e1') = this i j e1
-        (t2, e2')            = this i j e2
-    in
-    let panic_doc             = text "Coercion failed" <$>
-                                text "Function:" <+> pretty_typing e1 (FI.Fun t11 t12) <$>
-                                text "Argument:" <+> pretty_typing e2 t2 <$>
-                                text "Coercion:" <+> pretty_coercion t2 t11
-        pretty_typing e t     = FI.prettyExpr (unsafeCoerce e :: FI.Expr Index Index) <+> colon <+>
-                                FI.prettyType (unsafeCoerce t :: FI.Type Index)
-        pretty_coercion s1 s2 = FI.prettyType (unsafeCoerce s1 :: FI.Type Index) <+> text "<:" <+> FI.prettyType (unsafeCoerce s2 :: FI.Type Index)
-    in
-    let c = fromMaybe (prettyPanic "Simplify.transExpr'" panic_doc) (coerce i t2 t11)
-    in App e1' (App c e2')
+transType :: Index -> FI.Type Index -> Type Index
+transType i (FI.TVar n a) = TVar n a
+transType i (FI.JClass c) = JClass c 
+transType i (FI.Fun a1 a2) = Fun (transType i a1) (transType i a2)
+transType i (FI.Forall n f) = Forall n (\a -> transType (i + 1) . FI.fsubstTT i (FI.TVar n a) $ f i) -- why not (f a) directly?
+--transType i (FI.Product ts) = 
+transType i (FI.Unit) = Unit 
+--transType i (FI.And a1 a2) = 
+--transType i (FI.Record (_, t)) = 
+--transType i (FI.Datatype n ns) = 
+--transType i (FI.ListOf t) = 
 
-transExpr' _ this i j (FI.TApp e t)                   = TApp (snd (this i j e)) (transType i t)
-transExpr' _ this i j (FI.If p b1 b2)                 = If (snd (this i j p)) (snd (this i j b1)) (snd (this i j b2))
-transExpr' _ this i j (FI.PrimOp e1 op e2)            = PrimOp (snd (this i j e1)) op (snd (this i j e2))
-transExpr' _ this i j (FI.Tuple es)                   = Tuple (snd (unzip (map (this i j) es)))
-transExpr' _ this i j (FI.Proj index e)               = Proj index (snd (this i j e))
-transExpr' _ this i j (FI.JNew c es)                  = JNew c (snd (unzip (map (this i j) es)))
-transExpr' _ this i j (FI.Constr (FI.Constructor n ts) es) = Constr (Constructor n (map (transType i) ts)) (map (snd . this i j) es)
-transExpr' _ this i j (FI.Case e alts)                = Case e' (map transAlt alts)
-    where (_,e') = this i j e
-          transAlt (FI.ConstrAlt (FI.Constructor n ts) ns f) =
-              let m = length ts
-                  js = [j..j+m-1]
-                  (_,f') = this i (j+m) (f (zip js ts))
-                  ts' = map (transType i) ts
-              in ConstrAlt (Constructor n ts') ns (\es -> foldl (\acc (j',x) -> fsubstEE j' (var x) acc) f' (zip js es))
-
--- At the moment, in `System.out.println(x)`, `x` can be left as a thunk even
--- after the simplification. We need to recursively force the arguments of a
--- Java method call. The current solution is not very neat. It'd be better to
--- uniformly address all similar concerns for `App`, `JMethod`, and `PrimOp`.
-transExpr' _ this i j (FI.JMethod callee m args ret)
-  = let args' = map (forceLazy . this i j) args in
-    JMethod (fmap (snd . this i j) callee) m args' ret
-  where
-    forceLazy (_,e)          = e
-
-transExpr' _ this i j (FI.JField callee m ret)        = JField (fmap (snd . this i j) callee) m ret
-transExpr' _ this i j (FI.Seq es)                     = Seq (snd (unzip (map (this i j) es)))
-transExpr' _ this i j (FI.Merge e1 e2)                = Tuple [snd (this i j e1), snd (this i j e2)]
-transExpr' _ this i j (FI.RecordIntro (_,e))          = snd (this i j e)
-transExpr' super this i j (FI.RecordElim e l1)        = App c (snd (this i j e)) where Just (_,c) = getter i j (super i j e) l1
-transExpr' super this i j (FI.RecordUpdate e (l1,e1)) = App c (snd (this i j e)) where Just (_,c) = putter i j (super i j e) l1 (snd (this i j e1))
-
-transExpr :: Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> (FI.Type Index, Expr Index Index)
-transExpr = new (infer' `with` transExpr'')
-  where
-    transExpr'' :: Mixin
-      (Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> FI.Type Index)
-      (Index -> Index -> FI.Expr Index (Index, FI.Type Index) -> (FI.Type Index, Expr Index Index))
-    transExpr'' super this i j e  = (super i j e, transExpr' super this i j e)
-
-getter :: Index -> Index -> FI.Type Index -> S.Label -> Maybe (FI.Type Index, Expr Index Index)
-getter i j (FI.Record (l,t)) l1
-  | l1 == l   = Just (t, lam (transType i (FI.Record (l,t))) var)
+coerce :: Index -> FI.Type Index -> FI.Type Index -> Maybe (Expr Index Index)
+coerce i this@(FI.TVar _ a) (FI.TVar _ b)
+  | a == b = return $ lam (transType i this) var
   | otherwise = Nothing
-getter i j (FI.And t1 t2) l
-  = case getter i j t2 l of
-      Just (t,c) ->
-        Just (t, lam (transType i (FI.And t1 t2)) (App c . Proj 2 . var))
-      Nothing    ->
-        case getter i j t1 l of
-          Nothing    -> Nothing
-          Just (t,c) ->
-            Just (t, lam (transType i (FI.And t1 t2)) (App c . Proj 1 . var))
-getter _ _ _ _ = Nothing
-
-putter :: Index -> Index -> FI.Type Index -> S.Label -> Expr Index Index -> Maybe (FI.Type Index, Expr Index Index)
-putter i j (FI.Record (l,t)) l1 e
-  | l1 == l   = Just (t, Simplify.const (transType i (FI.Record (l,t))) e)
+coerce i this@(FI.JClass c) (FI.JClass d)
+  | c == d = return $ lam (transType i this) var
   | otherwise = Nothing
-putter i j (FI.And t1 t2) l e
-  = case putter i j t2 l e of
-      Just (t,c) ->
-        Just (t, lam (transType i (FI.And t1 t2)) (\x -> Tuple [Proj 1 (var x), App c (Proj 2 (var x))]))
-      Nothing    ->
-        case putter i j t1 l e of
-          Nothing    -> Nothing
-          Just (t,c) ->
-            Just (t, lam (transType i (FI.And t1 t2)) (\x -> Tuple [App c (Proj 1 (var x)), Proj 2 (var x)]))
-putter _ _ _ _ _ = Nothing
+--coerce i FI.ListOf FI.ListOf =
+coerce i this@(FI.Fun t1 t2) (FI.Fun t3 t4) = do
+  c1 <- coerce i t3 t1
+  c2 <- coerce i t2 t4
+  return $ lam (transType i this) (\f -> lam (transType i t3) ((App c2 . App (var f) . App c1) . var))
+--coerce i FI.Forall FI.Forall =
+--coerce i FI.Product FI.Product =
+coerce i this@(FI.Unit) (FI.Unit) = return $ lam (transType i this) var
+--coerce i _ FI.And =
+--coerce i FI.Record FI.Record =
+--coerce i FI.Datatype FI.Datatype =
+coerce _ _ _ = Nothing
 
-wrap :: Expr t e -> Expr t e
-wrap e = lam Unit (Prelude.const e)
+test :: Int -> Doc
+test id = prettyExpr . simplify $ l !! id
+  where l = [setZero, fact, evenOdd, apply]
 
-force :: Expr t e -> Expr t e
-force e = App e (Lit S.UnitLit)
+-- Utils.
+jInt  = FI.JClass "java.lang.Integer"
+jBool = FI.JClass "java.lang.Boolean"
+lit x = FI.Lit (S.Int x)
+true  = FI.Lit (S.Bool True)
+false = FI.Lit (S.Bool False)
+equal = S.Compare J.Equal
+add = S.Arith J.Add
+sub = S.Arith J.Sub
+mul = S.Arith J.Mult
 
-const :: Type t -> Expr t e -> Expr t e
-const t e = lam t (Prelude.const e)
+-- let setZero x : Int = 0 in setZero 5
+setZero :: FI.Expr Index (Index, FI.Type Index)
+setZero = FI.Let "setZero"  (FI.Lam "x" jInt (\x -> lit 0)) (\e -> FI.App (FI.Var "setZero" e) (lit 5))
 
-dedeBruijnType :: Index -> [t] -> Type Index -> Type t
-dedeBruijnType _ as (TVar n i)      = TVar n (reverse as !! i)
-dedeBruijnType _ _  (JClass c)      = JClass c
-dedeBruijnType i as (Fun t1 t2)     = Fun (dedeBruijnType i as t1) (dedeBruijnType i as t2)
-dedeBruijnType i as (Forall n f)    = Forall n (\a -> dedeBruijnType (i+1) (a:as) (f i))
-dedeBruijnType i as (Product ts)    = Product (map (dedeBruijnType i as) ts)
-dedeBruijnType _ _  (Unit)          = Unit
-dedeBruijnType _ _  (Datatype n ns) = Datatype n ns
+-- letfix fact n : Int = if n == 0 then 1 else n * fact n - 1 in fact 10
+fact :: FI.Expr Index (Index, FI.Type Index)
+fact = FI.Let "factorial" (FI.Fix "fact" "n" (\x x1 -> FI.If (FI.PrimOp (FI.Var "n" x1) equal (lit 0)) (lit 1) (FI.PrimOp (FI.Var "n" x1) mul (FI.App (FI.Var "fact" x) (FI.PrimOp (FI.Var "n" x1) sub (lit 1))))) jInt jInt) (\e -> FI.App (FI.Var "factorial" e) (lit 10))
 
-dedeBruijnExpr :: Index -> [t] -> Index -> [e] -> Expr Index Index -> Expr t e
-dedeBruijnExpr _ _  _ xs (Var n i)                      = Var n (reverse xs !! i)
-dedeBruijnExpr _ _  _ _  (Lit l)                        = Lit l
-dedeBruijnExpr i as j xs (Lam n t f)                    = Lam n
-                                                            (dedeBruijnType i as t)
-                                                            (\x -> dedeBruijnExpr i as (j+1) (x:xs) (f j))
-dedeBruijnExpr i as j xs (Fix fn pn f t1 t)             = Fix fn pn
-                                                            (\x x1 -> dedeBruijnExpr i as (j+2) (x1:x:xs) (f j (j+1)))
-                                                            (dedeBruijnType i as t1)
-                                                            (dedeBruijnType i as t)
-dedeBruijnExpr i as j xs (Let n e f)                    = Let n
-                                                            (dedeBruijnExpr i as j xs e) 
-                                                            (\x -> dedeBruijnExpr i as (j+1) (x:xs) (f j))
-dedeBruijnExpr i as j xs (LetRec ns ts fs e)            = LetRec ns 
-                                                            (map (dedeBruijnType i as) ts)
-                                                            (\xs' -> map (dedeBruijnExpr i as (j+n) ((reverse xs') ++ xs)) (fs [j..j+n-1]))
-                                                            (\xs' -> dedeBruijnExpr i as (j+n) ((reverse xs') ++ xs) (e [j..j+n-1]))
-                                                            where n = length ts
-dedeBruijnExpr i as j xs (BLam n f)                     = BLam n (\a -> dedeBruijnExpr (i+1) (a:as) j xs (f i))
-dedeBruijnExpr i as j xs (App f x)                      = App
-                                                            (dedeBruijnExpr i as j xs f)
-                                                            (dedeBruijnExpr i as j xs x)
-dedeBruijnExpr i as j xs (TApp f a)                     = TApp
-                                                            (dedeBruijnExpr i as j xs f)
-                                                            (dedeBruijnType i as a)
-dedeBruijnExpr i as j xs (If p b1 b2)                   = If p' b1' b2' where [p',b1',b2'] = map (dedeBruijnExpr i as j xs) [p,b1,b2]
-dedeBruijnExpr i as j xs (PrimOp e1 op e2)              = PrimOp
-                                                            (dedeBruijnExpr i as j xs e1) op
-                                                            (dedeBruijnExpr i as j xs e2)
-dedeBruijnExpr i as j xs (Tuple es)                     = Tuple (map (dedeBruijnExpr i as j xs) es)
-dedeBruijnExpr i as j xs (Proj index e)                 = Proj index (dedeBruijnExpr i as j xs e)
-dedeBruijnExpr i as j xs (JNew c args)                  = JNew c (map (dedeBruijnExpr i as j xs) args)
-dedeBruijnExpr i as j xs (JMethod callee m args r)      = JMethod
-                                                            (fmap (dedeBruijnExpr i as j xs) callee) m
-                                                            (map (dedeBruijnExpr i as j xs) args) r
-dedeBruijnExpr i as j xs (JField callee f r)            = JField (fmap (dedeBruijnExpr i as j xs) callee) f r
-dedeBruijnExpr i as j xs (Seq es)                       = Seq (map (dedeBruijnExpr i as j xs) es)
-dedeBruijnExpr i as j xs (Constr (Constructor n ts) es) = Constr
-                                                            (Constructor n (map (dedeBruijnType i as) ts))
-                                                            (map (dedeBruijnExpr i as j xs) es)
-dedeBruijnExpr i as j xs (Case e alts)                  = Case (dedeBruijnExpr i as j xs e) (map dedeBruijnAlt alts) where dedeBruijnAlt (ConstrAlt (Constructor name ts) names fe) = ConstrAlt (Constructor name (map (dedeBruijnType i as) ts)) names (\xs' -> dedeBruijnExpr i as (j+n) ((reverse xs') ++ xs) (fe [j..j+n-1])) where n = length ts
+-- letrec even x = if x == 0 then true else odd x-1, odd y = if y == 0 then false else even y-1 in even 50 
+evenOdd :: FI.Expr Index (Index, FI.Type Index)
+evenOdd = FI.LetRec ["even", "odd"] [FI.Fun jInt jBool, FI.Fun jInt jBool] (\(l1:l2:_) -> [FI.Lam "x" jInt (\x -> FI.If (FI.PrimOp (FI.Var "x" x) equal (lit 0)) true (FI.App (FI.Var "odd" l2) (FI.PrimOp (FI.Var "x" x) sub (lit 1)))), FI.Lam "y" jInt (\y -> FI.If (FI.PrimOp (FI.Var "y" y) equal (lit 0)) false (FI.App (FI.Var "even" l1) (FI.PrimOp (FI.Var "y" y) sub (lit 1))))]) (\(l1:l2:_) -> FI.App (FI.Var "even" l1) (lit 50))
+
+-- let apply P Q [x P] [y Q] [f P -> Q -> Int] = f x y in apply Int Bool 2 True (\m.\n. if n True m + 1 else m).
+apply :: FI.Expr Index (Index, FI.Type Index)
+apply = FI.Let "apply" app_body (\app -> lit 0)
+--  (\app -> FI.App (FI.App (FI.App (FI.TApp (FI.TApp (FI.Var "apply" app) jInt) jBool) (lit 2)) true) lambda_f)
+
+app_body :: FI.Expr Index (Index, FI.Type Index)
+app_body = FI.BLam "P" (\p -> FI.BLam "Q" (\q -> FI.Lam "x" (FI.TVar "P" p) (\x -> FI.Lam "y" (FI.TVar "Q" q) (\y -> FI.Lam "f" (FI.Fun (FI.TVar "P" p) (FI.Fun (FI.TVar "Q" q) jInt)) (\f -> FI.App (FI.App (FI.Var "f" f) (FI.Var "x" x)) (FI.Var "y" y))))))
+
+lambda_f :: FI.Expr Index (Index, FI.Type Index)
+lambda_f = FI.Lam "m" jInt (\m -> FI.Lam "n" jBool (\n -> FI.If (FI.PrimOp (FI.Var "n" n) equal true) (FI.PrimOp (FI.Var "m" m) add (lit 1)) (FI.Var "m" m)))
