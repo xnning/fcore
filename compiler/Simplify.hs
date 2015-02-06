@@ -10,6 +10,7 @@ import Text.PrettyPrint.ANSI.Leijen
 
 import Debug.Trace   (trace)
 import Data.Maybe    (fromMaybe)
+import Control.Monad (zipWithM)
 import Unsafe.Coerce (unsafeCoerce)
 
 simplify :: FI.Expr Index (Index, FI.Type Index) -> Expr Index Index
@@ -26,21 +27,44 @@ infer i j (FI.Fix _ _ _ t1 t) = FI.Fun t1 t
 infer i j (FI.Let _ b f) = infer i (j + 1) $ f (j, infer i j b)
 infer i j (FI.LetRec _ ts _ e) = infer i (j + n) $ e (zip [j..j+n-1] ts)
   where n = length ts
-infer i j (FI.BLam n f) = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) . infer (i + 1) j $ f i)
+
+--Old: infer i j (FI.BLam n f) = FI.Forall n (\a -> FI.fsubstTT i (FI.TVar n a) . infer (i + 1) j $ f i)
+infer i j (FI.BLam n f) = FI.Forall n (\a -> infer (i + 1) j $ f a)
+
 infer i j (FI.App f x) = t where FI.Fun _ t = infer i j f
---infer i j FI.TApp ?=
+
+infer i j (FI.TApp f x) = FI.fsubstTT i x (g i) 
+  where FI.Forall n g = infer (i + 1) j f
+-- Note: should be infer i j f actually. There is a bug here.
+-- When infer i j f:
+-- Example: let apply A B (x : A) (y : B) = 0 in apply Int Bool
+-- apply: forall A. forall B. A -> B -> Int
+-- (1) infer 0 0 (TApp (TApp apply Int) Bool): should infer 0 0 TApp(apply Int) first.
+-- (2) infer 0 0 (TApp apply Int):
+--     1. Type of apply:  forall A. forall B. A -> B -> Int
+--     2. Pass i = 0:     forall B. TVar 0 -> B -> Int
+--     3. Substitution:   forall B. Int    -> B -> Int                           (Expected)
+--                        forall B. Int    -> (if B == 0 then Int else B) -> Int (Actual)
+-- (3) When Bool comes:
+--     Expected:  forall B. Int -> B -> Int
+--     (i = 0) => Int -> TVar 0 -> Int
+--      (Bool) => Int -> Bool   -> Int
+--     Actual:    forall B. Int -> (if B == 0 then Int else B) -> Int
+--     (i = 0) => Int -> Int -> Int
+--      (Bool) => Int -> Int -> Int
+
 infer i j (FI.If _ e _) = infer i j e
 infer i j (FI.PrimOp _ op _) = case op of S.Arith   _ -> FI.JClass "java.lang.Integer"
                                           S.Compare _ -> FI.JClass "java.lang.Boolean"
                                           S.Logic   _ -> FI.JClass "java.lang.Boolean" 
---infer i j FI.Tuple ?=
---infer i j FI.Proj ?=
+infer i j (FI.Tuple es) = FI.Product . map (infer i j) $ es
+infer i j (FI.Proj index e) = ts !! (index - 1) where FI.Product ts = infer i j e
 --infer i j FI.JNew ?=
 --infer i j FI.JMethod ?=
 --infer i j FI.JField ?=
 --infer i j FI.PolyList ?=
 --infer i j FI.JProxyCall ?=
---infer i j FI.Seq ?=
+infer i j (FI.Seq es) = infer i j (last es)
 --infer i j FI.Merge ?=
 --infer i j FI.RecordIntro ?=
 --infer i j FI.RecordElim ?=
@@ -70,7 +94,10 @@ transExpr i j (FI.LetRec ns ts bs e) = LetRec ns ts' bs' e'
     trans = transExpr i (j + n)
     subst :: [Index] -> Expr Index Index -> Expr Index Index
     subst rs = foldl (.) id [ fsubstEE x (Var (ns !! k) (rs !! k)) | (x, k) <- zip [j..j+n-1] [0..n-1] ]
-transExpr i j (FI.BLam n f) = BLam n (\a -> fsubstTE i (TVar n a) . transExpr (i + 1) j $ f i)
+
+--Old: transExpr i j (FI.BLam n f) = BLam n (\a -> fsubstTE i (TVar n a) . transExpr (i + 1) j $ f i)
+transExpr i j (FI.BLam n f) = BLam n (\a -> transExpr (i + 1) j $ f a)
+
 transExpr i j (FI.App f x) =
   let (FI.Fun t1 t2, e1) = (infer i j f, transExpr i j f)
       (t3, e2)           = (infer i j x, transExpr i j x)
@@ -84,18 +111,18 @@ transExpr i j (FI.App f x) =
                                     FI.prettyType (unsafeCoerce temp2 :: FI.Type Index)
   in let c = fromMaybe (prettyPanic "Simplify.transExpr" panic_doc) (coerce i t3 t1)
      in App e1 (App c e2)
---transExpr i j FI.TApp ?=
+transExpr i j (FI.TApp f x) = TApp (transExpr i j f) (transType i x)
 transExpr i j (FI.If e1 e2 e3) = If e1' e2' e3'
   where [e1', e2', e3'] = map (transExpr i j) [e1, e2, e3]
 transExpr i j (FI.PrimOp e1 op e2) = PrimOp (transExpr i j e1) op (transExpr i j e2)
---transExpr i j FI.Tuple ?=
---transExpr i j FI.Proj ?=
+transExpr i j (FI.Tuple es) = Tuple . map (transExpr i j) $ es
+transExpr i j (FI.Proj index e) = Proj index $ transExpr i j e
 --transExpr i j FI.JNew ?=
 --transExpr i j FI.JMethod ?=
 --transExpr i j FI.JField ?=
 --transExpr i j FI.PolyList ?=
 --transExpr i j FI.JProxyCall ?=
---transExpr i j FI.Seq ?=
+transExpr i j (FI.Seq es) = Seq . map (transExpr i j) $ es
 --transExpr i j FI.Merge ?=
 --transExpr i j FI.RecordIntro ?=
 --transExpr i j FI.RecordElim ?=
@@ -108,8 +135,11 @@ transType :: Index -> FI.Type Index -> Type Index
 transType i (FI.TVar n a) = TVar n a
 transType i (FI.JClass c) = JClass c 
 transType i (FI.Fun a1 a2) = Fun (transType i a1) (transType i a2)
-transType i (FI.Forall n f) = Forall n (\a -> transType (i + 1) . FI.fsubstTT i (FI.TVar n a) $ f i) -- why not (f a) directly?
---transType i (FI.Product ts) = 
+
+--Old: transType i (FI.Forall n f) = Forall n (\a -> transType (i + 1) . FI.fsubstTT i (FI.TVar n a) $ f i)
+transType i (FI.Forall n f) = Forall n (\a -> transType (i + 1) $ f a)
+
+transType i (FI.Product ts) = Product . map (transType i) $ ts 
 transType i (FI.Unit) = Unit 
 --transType i (FI.And a1 a2) = 
 --transType i (FI.Record (_, t)) = 
@@ -128,8 +158,15 @@ coerce i this@(FI.Fun t1 t2) (FI.Fun t3 t4) = do
   c1 <- coerce i t3 t1
   c2 <- coerce i t2 t4
   return $ lam (transType i this) (\f -> lam (transType i t3) ((App c2 . App (var f) . App c1) . var))
---coerce i FI.Forall FI.Forall =
---coerce i FI.Product FI.Product =
+coerce i this@(FI.Forall _ f) (FI.Forall _ g) = do
+  c <- coerce (i + 1) (f i) (g i)
+  return $ lam (transType i this) (\f' -> bLam $ (App c . TApp (var f')) . TVar "")
+coerce i this@(FI.Product ss) (FI.Product ts)
+  | length ss /= length ts = Nothing
+  | otherwise = do
+      cs <- zipWithM (coerce i) ss ts
+      let f x = Tuple $ zipWith (\c idx -> App c $ Proj idx x) cs [1..length ss]
+      return $ lam (transType i this) (f . var)
 coerce i this@(FI.Unit) (FI.Unit) = return $ lam (transType i this) var
 --coerce i _ FI.And =
 --coerce i FI.Record FI.Record =
@@ -150,6 +187,10 @@ equal = S.Compare J.Equal
 add = S.Arith J.Add
 sub = S.Arith J.Sub
 mul = S.Arith J.Mult
+t2str = show . FI.prettyType
+e2str = show . FI.prettyExpr
+t2str' = show . prettyType
+e2str' = show . prettyExpr
 
 -- let setZero x : Int = 0 in setZero 5
 setZero :: FI.Expr Index (Index, FI.Type Index)
@@ -165,8 +206,8 @@ evenOdd = FI.LetRec ["even", "odd"] [FI.Fun jInt jBool, FI.Fun jInt jBool] (\(l1
 
 -- let apply P Q [x P] [y Q] [f P -> Q -> Int] = f x y in apply Int Bool 2 True (\m.\n. if n True m + 1 else m).
 apply :: FI.Expr Index (Index, FI.Type Index)
-apply = FI.Let "apply" app_body (\app -> lit 0)
---  (\app -> FI.App (FI.App (FI.App (FI.TApp (FI.TApp (FI.Var "apply" app) jInt) jBool) (lit 2)) true) lambda_f)
+apply = FI.Let "apply" app_body
+  (\app -> FI.App (FI.App (FI.App (FI.TApp (FI.TApp (FI.Var "apply" app) jInt) jBool) (lit 2)) true) lambda_f)
 
 app_body :: FI.Expr Index (Index, FI.Type Index)
 app_body = FI.BLam "P" (\p -> FI.BLam "Q" (\q -> FI.Lam "x" (FI.TVar "P" p) (\x -> FI.Lam "y" (FI.TVar "Q" q) (\y -> FI.Lam "f" (FI.Fun (FI.TVar "P" p) (FI.Fun (FI.TVar "Q" q) jInt)) (\f -> FI.App (FI.App (FI.Var "f" f) (FI.Var "x" x)) (FI.Var "y" y))))))
