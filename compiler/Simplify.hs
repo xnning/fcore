@@ -173,6 +173,26 @@ coerce i this@(FI.Unit) (FI.Unit) = return $ lam (transType i this) var
 --coerce i FI.Datatype FI.Datatype =
 coerce _ _ _ = Nothing
 
+substTT :: (S.ReaderId -> Index -> FI.Type Index) -> [FI.Type Index] -> FI.Type Index
+substTT g ts@((FI.TVar n a):_) = if const then g n a else FI.TVar n a
+  where const = all (== a) . map (\x -> let FI.TVar _ y = x in y) $ ts
+substTT g ((FI.JClass c):_) = FI.JClass c
+substTT g ts@((FI.Fun _ _):_) = FI.Fun (substTT g ts1) (substTT g ts2)
+  where (ts1, ts2) = unzip . map (\x -> let FI.Fun t1 t2 = x in (t1, t2)) $ ts
+substTT g ts@((FI.Forall n _):_) = FI.Forall n (\z -> substTT g $ ts' z)
+  where ts' z = concat . map (\x -> let FI.Forall _ f = x in [f z, f (z + 1)]) $ ts
+substTT g ts@((FI.Product _):_) = FI.Product ts'
+  where 
+    ts' = map (substTT g) . transpose . map (\x -> let FI.Product hs = x in hs) $ ts
+    transpose :: [[a]] -> [[a]]
+    transpose [] = []
+    transpose xs = (map head xs):(transpose . map tail $ xs)
+substTT g ((FI.Unit):_) = FI.Unit
+--substTT g ((FI.ListOf _):_) =
+--substTT g ((FI.And _ _):_) =
+--substTT g ((FI.Record _):_) =
+--substTT g ((FI.Datatype _ _):_) =
+
 test :: Int -> Doc
 test id = prettyExpr . simplify $ l !! id
   where l = [setZero, fact, evenOdd, apply]
