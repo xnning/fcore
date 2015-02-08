@@ -33,8 +33,8 @@ infer i j (FI.BLam n f) = FI.Forall n (\a -> infer (i + 1) j $ f a)
 
 infer i j (FI.App f x) = t where FI.Fun _ t = infer i j f
 
-infer i j (FI.TApp f x) = FI.fsubstTT i x (g i) 
-  where FI.Forall n g = infer (i + 1) j f
+infer i j (FI.TApp f x) = substTT (\n a -> if a == i then x else FI.TVar n a) [g i] 
+  where FI.Forall n g = infer i j f
 -- Note: should be infer i j f actually. There is a bug here.
 -- When infer i j f:
 -- Example: let apply A B (x : A) (y : B) = 0 in apply Int Bool
@@ -65,10 +65,10 @@ infer i j (FI.Proj index e) = ts !! (index - 1) where FI.Product ts = infer i j 
 --infer i j FI.PolyList ?=
 --infer i j FI.JProxyCall ?=
 infer i j (FI.Seq es) = infer i j (last es)
---infer i j FI.Merge ?=
---infer i j FI.RecordIntro ?=
+infer i j (FI.Merge e1 e2) = FI.And (infer i j e1) (infer i j e2)
+infer i j (FI.RecordIntro (l, e)) = FI.Record (l, infer i j e)
 --infer i j FI.RecordElim ?=
---infer i j FI.RecordUpdate ?=
+infer i j (FI.RecordUpdate e _) = infer i j e
 --infer i j FI.Constr ?=
 --infer i j FI.Case ?=
 infer _ _ _ = trace "Wrong1" FI.Unit
@@ -123,8 +123,8 @@ transExpr i j (FI.Proj index e) = Proj index $ transExpr i j e
 --transExpr i j FI.PolyList ?=
 --transExpr i j FI.JProxyCall ?=
 transExpr i j (FI.Seq es) = Seq . map (transExpr i j) $ es
---transExpr i j FI.Merge ?=
---transExpr i j FI.RecordIntro ?=
+transExpr i j (FI.Merge e1 e2) = Tuple . map (transExpr i j) $ [e1, e2]
+transExpr i j (FI.RecordIntro (l, e)) = transExpr i j e
 --transExpr i j FI.RecordElim ?=
 --transExpr i j FI.RecordUpdate ?=
 --transExpr i j FI.Constr ?=
@@ -141,8 +141,8 @@ transType i (FI.Forall n f) = Forall n (\a -> transType (i + 1) $ f a)
 
 transType i (FI.Product ts) = Product . map (transType i) $ ts 
 transType i (FI.Unit) = Unit 
---transType i (FI.And a1 a2) = 
---transType i (FI.Record (_, t)) = 
+transType i (FI.And a1 a2) = Product . map (transType i) $ [a1, a2]
+transType i (FI.Record (_, t)) = transType i t 
 --transType i (FI.Datatype n ns) = 
 --transType i (FI.ListOf t) = 
 
@@ -168,8 +168,19 @@ coerce i this@(FI.Product ss) (FI.Product ts)
       let f x = Tuple $ zipWith (\c idx -> App c $ Proj idx x) cs [1..length ss]
       return $ lam (transType i this) (f . var)
 coerce i this@(FI.Unit) (FI.Unit) = return $ lam (transType i this) var
---coerce i _ FI.And =
---coerce i FI.Record FI.Record =
+coerce i t1 (FI.And t2 t3) = do
+  c1 <- coerce i t1 t2
+  c2 <- coerce i t1 t3
+  return $ lam (transType i t1) (\x -> Tuple [App c1 (var x), App c2 (var x)])
+coerce i this@(FI.And t1 t2) t3 = if n == 0 then Nothing else return $ lam (transType i this) (App c . Proj n . var)
+  where (n, c) = case coerce i t1 t3 of
+                   Just c1 -> (1, c1)
+                   Nothing -> case coerce i t2 t3 of
+                                Just c2 -> (2, c2)
+                                Nothing -> (0, var 0)
+coerce i (FI.Record (l1, t1)) (FI.Record (l2, t2))
+  | l1 == l2  = coerce i t1 t2
+  | otherwise = Nothing
 --coerce i FI.Datatype FI.Datatype =
 coerce _ _ _ = Nothing
 
@@ -189,13 +200,15 @@ substTT g ts@((FI.Product _):_) = FI.Product ts'
     transpose xs = (map head xs):(transpose . map tail $ xs)
 substTT g ((FI.Unit):_) = FI.Unit
 --substTT g ((FI.ListOf _):_) =
---substTT g ((FI.And _ _):_) =
---substTT g ((FI.Record _):_) =
+substTT g ts@((FI.And _ _):_) = FI.And (substTT g ts1) (substTT g ts2)
+  where (ts1, ts2) = unzip . map (\x -> let FI.And t1 t2 = x in (t1, t2)) $ ts
+substTT g ts@((FI.Record (l, _)):_) = FI.Record (l, t')
+  where t' = substTT g . map (\x -> let FI.Record (_, t) = x in t) $ ts
 --substTT g ((FI.Datatype _ _):_) =
 
 test :: Int -> Doc
 test id = prettyExpr . simplify $ l !! id
-  where l = [setZero, fact, evenOdd, apply]
+  where l = [setZero, fact, evenOdd, apply, intersection, product0]
 
 -- Utils.
 jInt  = FI.JClass "java.lang.Integer"
@@ -228,9 +241,16 @@ evenOdd = FI.LetRec ["even", "odd"] [FI.Fun jInt jBool, FI.Fun jInt jBool] (\(l1
 apply :: FI.Expr Index (Index, FI.Type Index)
 apply = FI.Let "apply" app_body
   (\app -> FI.App (FI.App (FI.App (FI.TApp (FI.TApp (FI.Var "apply" app) jInt) jBool) (lit 2)) true) lambda_f)
+  where
+    app_body :: FI.Expr Index (Index, FI.Type Index)
+    app_body = FI.BLam "P" (\p -> FI.BLam "Q" (\q -> FI.Lam "x" (FI.TVar "P" p) (\x -> FI.Lam "y" (FI.TVar "Q" q) (\y -> FI.Lam "f" (FI.Fun (FI.TVar "P" p) (FI.Fun (FI.TVar "Q" q) jInt)) (\f -> FI.App (FI.App (FI.Var "f" f) (FI.Var "x" x)) (FI.Var "y" y))))))
+    lambda_f :: FI.Expr Index (Index, FI.Type Index)
+    lambda_f = FI.Lam "m" jInt (\m -> FI.Lam "n" jBool (\n -> FI.If (FI.PrimOp (FI.Var "n" n) equal true) (FI.PrimOp (FI.Var "m" m) add (lit 1)) (FI.Var "m" m)))
 
-app_body :: FI.Expr Index (Index, FI.Type Index)
-app_body = FI.BLam "P" (\p -> FI.BLam "Q" (\q -> FI.Lam "x" (FI.TVar "P" p) (\x -> FI.Lam "y" (FI.TVar "Q" q) (\y -> FI.Lam "f" (FI.Fun (FI.TVar "P" p) (FI.Fun (FI.TVar "Q" q) jInt)) (\f -> FI.App (FI.App (FI.Var "f" f) (FI.Var "x" x)) (FI.Var "y" y))))))
+-- let succ x = x + 1 in succ (setZero ,, 1)
+intersection :: FI.Expr Index (Index, FI.Type Index)
+intersection = FI.Let "succ" (FI.Lam "x" jInt (\x -> FI.PrimOp (FI.Var "x" x) add (lit 1))) (\succ -> FI.App (FI.Var "succ" succ) (FI.Merge (FI.Lam "setZero" jInt (\x -> lit 0)) (lit 1)))
 
-lambda_f :: FI.Expr Index (Index, FI.Type Index)
-lambda_f = FI.Lam "m" jInt (\m -> FI.Lam "n" jBool (\n -> FI.If (FI.PrimOp (FI.Var "n" n) equal true) (FI.PrimOp (FI.Var "m" m) add (lit 1)) (FI.Var "m" m)))
+-- let f x = (x, 2x) in (f 3)._2
+product0 :: FI.Expr Index (Index, FI.Type Index)
+product0 = FI.Let "f" (FI.Lam "x" jInt (\x -> FI.Tuple [FI.Var "x" x, FI.PrimOp (FI.Var "x" x) mul (lit 2)])) (\f -> FI.Proj 2 (FI.App (FI.Var "f" f) (lit 3)))
