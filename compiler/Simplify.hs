@@ -67,7 +67,7 @@ infer i j (FI.Proj index e) = ts !! (index - 1) where FI.Product ts = infer i j 
 infer i j (FI.Seq es) = infer i j (last es)
 infer i j (FI.Merge e1 e2) = FI.And (infer i j e1) (infer i j e2)
 infer i j (FI.RecordIntro (l, e)) = FI.Record (l, infer i j e)
---infer i j FI.RecordElim ?=
+infer i j (FI.RecordElim e l1) = t1 where Just (t1, _) = getter i j (infer i j e) l1
 infer i j (FI.RecordUpdate e _) = infer i j e
 --infer i j FI.Constr ?=
 --infer i j FI.Case ?=
@@ -125,8 +125,10 @@ transExpr i j (FI.Proj index e) = Proj index $ transExpr i j e
 transExpr i j (FI.Seq es) = Seq . map (transExpr i j) $ es
 transExpr i j (FI.Merge e1 e2) = Tuple . map (transExpr i j) $ [e1, e2]
 transExpr i j (FI.RecordIntro (l, e)) = transExpr i j e
---transExpr i j FI.RecordElim ?=
---transExpr i j FI.RecordUpdate ?=
+transExpr i j (FI.RecordElim e l1) = App c (transExpr i j e)
+  where Just (_, c) = getter i j (infer i j e) l1
+transExpr i j (FI.RecordUpdate e (l1, e1)) = App c (transExpr i j e)
+  where Just (_, c) = putter i j (infer i j e) l1 (transExpr i j e1)
 --transExpr i j FI.Constr ?=
 --transExpr i j FI.Case ?=
 transExpr _ _ _ = trace "Wrong2" (Var "" (-1))
@@ -172,17 +174,41 @@ coerce i t1 (FI.And t2 t3) = do
   c1 <- coerce i t1 t2
   c2 <- coerce i t1 t3
   return $ lam (transType i t1) (\x -> Tuple [App c1 (var x), App c2 (var x)])
-coerce i this@(FI.And t1 t2) t3 = if n == 0 then Nothing else return $ lam (transType i this) (App c . Proj n . var)
-  where (n, c) = case coerce i t1 t3 of
-                   Just c1 -> (1, c1)
-                   Nothing -> case coerce i t2 t3 of
-                                Just c2 -> (2, c2)
-                                Nothing -> (0, var 0)
+coerce i this@(FI.And t1 t2) t3 =
+  case coerce i t1 t3 of
+    Just c  -> return $ lam (transType i this) (App c . Proj 1 . var)
+    Nothing -> case coerce i t2 t3 of
+                 Just c  -> return $ lam (transType i this) (App c . Proj 2 . var)
+                 Nothing -> Nothing
 coerce i (FI.Record (l1, t1)) (FI.Record (l2, t2))
   | l1 == l2  = coerce i t1 t2
   | otherwise = Nothing
 --coerce i FI.Datatype FI.Datatype =
 coerce _ _ _ = Nothing
+
+getter :: Index -> Index -> FI.Type Index -> S.Label -> Maybe (FI.Type Index, Expr Index Index)
+getter i j this@(FI.Record (l, t)) l1
+  | l1 == l = return $ (t, lam (transType i this) var)
+  | otherwise = Nothing
+getter i j this@(FI.And t1 t2) l =
+  case getter i j t2 l of
+    Just (t, c) -> return $ (t, lam (transType i this) (App c . Proj 2 . var))
+    Nothing     -> case getter i j t1 l of
+                     Just (t, c) -> return $ (t, lam (transType i this) (App c . Proj 1 . var))
+                     Nothing     -> Nothing
+getter _ _ _ _ = Nothing
+
+putter :: Index -> Index -> FI.Type Index -> S.Label -> Expr Index Index -> Maybe (FI.Type Index, Expr Index Index)
+putter i j this@(FI.Record (l, t)) l1 e
+  | l1 == l = return $ (t, lam (transType i this) (Prelude.const e))
+  | otherwise = Nothing
+putter i j this@(FI.And t1 t2) l e =
+  case putter i j t2 l e of
+    Just (t, c) -> return $ (t, lam (transType i this) (\x -> Tuple [Proj 1 . var $ x, App c . Proj 2 . var $ x]))
+    Nothing     -> case putter i j t1 l e of
+                     Just (t, c) -> return $ (t, lam (transType i this) (\x -> Tuple [App c . Proj 1 . var $ x, Proj 2 . var $ x]))
+                     Nothing     -> Nothing
+putter _ _ _ _ _ = Nothing
 
 substTT :: (S.ReaderId -> Index -> FI.Type Index) -> [FI.Type Index] -> FI.Type Index
 substTT g ts@((FI.TVar n a):_) = if const then g n a else FI.TVar n a
@@ -210,10 +236,15 @@ test :: Int -> Doc
 test id = prettyExpr . simplify $ l !! id
   where l = [setZero, fact, evenOdd, apply, intersection, product0]
 
+test2 :: Int -> Doc
+test2 id = prettyExpr . simplify $ l !! id
+  where l = [bob, bob1, bob2, listAlg]
+
 -- Utils.
 jInt  = FI.JClass "java.lang.Integer"
 jBool = FI.JClass "java.lang.Boolean"
 lit x = FI.Lit (S.Int x)
+str s = FI.Lit (S.String s)
 true  = FI.Lit (S.Bool True)
 false = FI.Lit (S.Bool False)
 equal = S.Compare J.Equal
@@ -254,3 +285,32 @@ intersection = FI.Let "succ" (FI.Lam "x" jInt (\x -> FI.PrimOp (FI.Var "x" x) ad
 -- let f x = (x, 2x) in (f 3)._2
 product0 :: FI.Expr Index (Index, FI.Type Index)
 product0 = FI.Let "f" (FI.Lam "x" jInt (\x -> FI.Tuple [FI.Var "x" x, FI.PrimOp (FI.Var "x" x) mul (lit 2)])) (\f -> FI.Proj 2 (FI.App (FI.Var "f" f) (lit 3)))
+
+-- { name = "Bob", age = 30, language = "Haskell"}
+bob :: FI.Expr Index (Index, FI.Type Index)
+bob = FI.Merge (FI.Merge (FI.RecordIntro ("name", str "Bob")) (FI.RecordIntro ("age", lit 30))) (FI.RecordIntro ("language", str "Haskell"))
+
+-- bob.language
+bob1 :: FI.Expr Index (Index, FI.Type Index)
+bob1 = FI.RecordElim (FI.Merge (FI.Merge (FI.RecordIntro ("name", str "Bob")) (FI.RecordIntro ("age", lit 30))) (FI.RecordIntro ("language", str "Haskell"))) "language"
+
+-- let x = bob with {age = 35} in (x.name, x.age, x.language)._2
+bob2 :: FI.Expr Index (Index, FI.Type Index)
+bob2 = FI.Let "x" (FI.RecordUpdate bob ("age", lit 35)) (\x -> FI.Proj 2 (FI.Tuple [FI.RecordElim (FI.Var "x" x) "name", FI.RecordElim (FI.Var "x" x) "age", FI.RecordElim (FI.Var "x" x) "language"]))
+
+-- type ListAlg A L = { nil : L, cons : A -> L -> L };
+-- type MyList A = { accept : forall K. ListAlg A K -> K };
+-- let nil A (x : Int) : MyList A = { accept = /\M. \(f : ListAlg A M). f.nil };
+-- let cons A (x : A) (xs : MyList A) : MyList A = { accept = /\N. \(f : ListAlg A N). f.cons x (xs.accept N f) };
+-- cons Int 5 (cons Int 3 (nil Int 0))
+listAlg :: FI.Expr Index (Index, FI.Type Index)
+listAlg = FI.Let "nil" nil (\n -> FI.Let "cons" cons (\c -> FI.App (FI.App (FI.TApp (FI.Var "cons" c) jInt) (lit 5)) (FI.App (FI.App (FI.TApp (FI.Var "cons" c) jInt) (lit 3)) (FI.App (FI.TApp (FI.Var "nil" n) jInt) (lit 0))))) 
+  where
+    alg :: FI.Type Index -> FI.Type Index -> FI.Type Index
+    alg a l = FI.And (FI.Record ("nil", l)) (FI.Record ("cons", FI.Fun a (FI.Fun l l)))
+    myList :: FI.Type Index -> FI.Type Index
+    myList a = FI.Record ("accept", FI.Forall "K" (\k -> FI.Fun (alg a (FI.TVar "K" k)) (FI.TVar "K" k)))
+    nil :: FI.Expr Index (Index, FI.Type Index)
+    nil = FI.BLam "A" (\a -> FI.Lam "x" jInt (\x -> FI.RecordIntro ("accept", FI.BLam "M" (\m -> FI.Lam "f" (alg (FI.TVar "A" a) (FI.TVar "M" m)) (\f -> FI.RecordElim (FI.Var "f" f) "nil")))))
+    cons :: FI.Expr Index (Index, FI.Type Index)
+    cons  = FI.BLam "A" (\a -> FI.Lam "x" (FI.TVar "A" a) (\x -> FI.Lam "xs" (myList (FI.TVar "A" a)) (\xs -> FI.RecordIntro ("accept", FI.BLam "N" (\n -> FI.Lam "f" (alg (FI.TVar "A" a) (FI.TVar "N" n)) (\f -> FI.App (FI.App (FI.RecordElim (FI.Var "f" f) "cons") (FI.Var "x" x)) (FI.App (FI.TApp (FI.RecordElim (FI.Var "xs" xs) "accept") (FI.TVar "N" n)) (FI.Var "f" f))))))))
