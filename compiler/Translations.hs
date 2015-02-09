@@ -41,7 +41,7 @@ import           MonadLib
 import           Parser (reader)
 import           PartialEvaluator
 import           PrettyUtils
-import           Simplify (simplify)
+import           Simplify (simplify, FExp(..))
 import           StackTransCFJava
 import           TypeCheck (typeCheck)
 import           UnboxTransCFJava
@@ -169,10 +169,11 @@ sf2java num optDump compilation className src =
          do when (optDump == DumpTChecked) $ print tcheckedSrc
             let core = desugar tcheckedSrc
             when (optDump == DumpCore) $ print (SystemFI.uglyExpr core)
+            let coreF = HideF core
             let simpleCore = case num of
-                               1 -> inliner . simplify $ core
-                               2 -> inliner . inliner . simplify $ core
-                               _ -> simplify core
+                               1 -> inliner . simplify $ coreF
+                               2 -> inliner . inliner . simplify $ coreF
+                               _ -> simplify coreF
 
             let rewrittencore = rewriteAndEval (Hide simpleCore)
             when (optDump == DumpSimpleCore) $ print (Core.prettyExpr simpleCore)
