@@ -1,22 +1,65 @@
+### BEGIN: Define ListAlg, MyList ###
 type ListAlg A L = {
-  nil : L,
-  cons : A -> L -> L
+  nil : Int -> L,
+  con : Int -> A -> L -> L
 };
-type MyList B = {
-  accept : forall C. ListAlg B C -> C
+type MyList A = {
+  accept : forall L. ListAlg A L -> L
 };
-let nil D : MyList D = {
-  accept = /\E. \(f : ListAlg D E). f.nil
-};
-let cons F (x : F) (xs : MyList F) : MyList F = {
-  accept = /\G. \(f : ListAlg F G). f.cons x (xs.accept G f)
-};
-#let lengthList = /\H. {
-#  nil = 0,
-#  cons = \(x : H). \(y : Int). y + 1
-#};
-let getLen I (xs : MyList I) : Int = xs.accept Int ( {nil = 0, cons = \(x : I). \(y : Int). y + 1} );
-let nilStr : MyList String = nil String;
-let consStr (x : String) (xs : MyList String) = cons String x xs;
-getLen String (consStr "abc" (consStr "def" (consStr "ghi" nilStr)))
+### END:   Define ListAlg, MyList ###
 
+### BEGIN: Construction ###
+let len A (l : MyList A) : Int = l.accept Int {
+  nil = \(x : Int). 0,
+  con = \(x : Int). \(y : A). \(z : Int). z + 1
+};
+let ni A : MyList A = {
+  accept = /\L. \(f : ListAlg A L). f.nil 0
+};
+let co A (x : A) (xs : MyList A) : MyList A = {
+  accept = /\L. \(f : ListAlg A L). f.con (1 + len A xs) x (xs.accept L f)
+};
+let rec gen L (i : Int) (n : Int) (f : ListAlg Int L) : L =
+  if i > n then f.nil 0 else f.con (n + 1 - i) i (gen L (i + 1) n f);
+let generate (n : Int) : MyList Int = {
+  accept = /\L. \(f : ListAlg Int L). gen L 1 n f 
+};
+### END:   Construction ###
+
+### BEGIN: Pretty Printer ###
+let print A (f : A -> String) (l : MyList A) : String = "[".concat(l.accept String {
+  nil = \(x : Int). "NIL",
+  con = \(x : Int). \(y : A). \(z : String). (f y).concat(", ").concat(z)
+}).concat("]");
+### END  : Pretty Printer ###
+
+### BEGIN: Map, Remove, Insert, Foldr ###
+let mmap A B (func : A -> B) (xs : MyList A) : MyList B = {
+  accept = /\L. \(f : ListAlg B L). xs.accept L {
+    nil = \(x : Int). f.nil x,
+    con = \(x : Int). \(y : A). \(z : L). f.con x (func y) z
+  }
+};
+let mrem A (num : Int) (xs : MyList A) : MyList A = {
+  accept = /\L. \(f : ListAlg A L). xs.accept L {
+    nil = \(x : Int). f.nil x,
+    con = \(x : Int). \(y : A). \(z : L). if x == num then z else if x > num then f.con (x - 1) y z else f.con x y z
+  }
+};
+let mins A (num : Int) (a : A) (xs : MyList A) : MyList A = {
+  accept = /\L. \(f : ListAlg A L). xs.accept L {
+    nil = \(x : Int). if num == 0 then f.con 1 a (f.nil x) else f.nil x,
+    con = \(x : Int). \(y : A). \(z : L). if x == num then f.con (x + 1) y (f.con x a z) else if x > num then f.con (x + 1) y z else f.con x y z
+  }
+};
+let mfold A B (func : A -> B -> B) (acc : B) (xs : MyList A) : B = xs.accept B {
+  nil = \(x : Int). acc,
+  con = \(x : Int). \(y : A). \(z : B). func y z
+}; 
+### END  : Map, Remove, Insert, Foldr ###
+
+### BEGIN: Client Code ###
+let res = mmap Int Int (\(x : Int). x + 1) (generate 5);
+let res2 = mfold Int Int (\(x : Int). \(y : Int). x * y) 1 res;
+"foldr (*) 1 (map succ [1..5]) = foldr (*) 1 ".concat(print Int (\(x : Int). x.toString()) res).concat(" = ").concat(res2.toString())
+### END  : Client Code ###
