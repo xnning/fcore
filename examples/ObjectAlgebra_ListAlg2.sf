@@ -13,4 +13,4 @@ let mprint (xs : MList String) = xs.accept [String] {
   nil = "Nil",
   con = \(x : String). \(y : String). x.concat(", ").concat(y)
 };
-mprint (mmap [Int] [String] (\(x : Int). "x".concat(x.toString())) (con [Int] 2 (con [Int] 3 (con [Int] 5 (nil [Int])))))
+mprint (mmap [Int] [String] (\(x : Int). "x".concat(x.toString())) (con 2 (con 3 (con 5 (nil [Int])))))
