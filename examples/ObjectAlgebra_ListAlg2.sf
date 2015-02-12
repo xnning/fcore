@@ -1,0 +1,16 @@
+type ListAlg A L = { nil : L, con : A -> L -> L };
+type MList A = { accept : forall L. ListAlg A L -> L };
+let mmap A B (f : A -> B) (xs : MList A) : MList B = xs.accept [(MList B)] {
+  nil = { accept = /\L. \(alg : ListAlg B L). alg.nil },
+  con = \(x : A). \(y : MList B). { accept = /\L. \(alg : ListAlg B L).
+    alg.con (f x) (y.accept [L] alg) }
+};
+let nil A = { accept = /\L. \(f : ListAlg A L). f.nil };
+let con A (x : A) (xs : MList A) = {
+  accept = /\L. \(f : ListAlg A L). f.con x (xs.accept [L] f)
+};
+let mprint (xs : MList String) = xs.accept [String] {
+  nil = "Nil",
+  con = \(x : String). \(y : String). x.concat(", ").concat(y)
+};
+mprint (mmap [Int] [String] (\(x : Int). "x".concat(x.toString())) (con [Int] 2 (con [Int] 3 (con [Int] 5 (nil [Int])))))

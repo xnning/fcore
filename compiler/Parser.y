@@ -222,7 +222,7 @@ infixexpr :: { ReaderExpr }
 
 fexpr :: { ReaderExpr }
     : fexpr aexpr        { App  $1 $2 }
-    | fexpr atype        { TApp $1 $2 }
+    | fexpr "[" atype "]"{ TApp $1 $3 }
     | aexpr              { $1 }
 
 aexpr :: { ReaderExpr }
