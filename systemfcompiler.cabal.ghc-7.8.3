@@ -79,3 +79,11 @@ executable f2ji
                         -fno-warn-unused-matches
                         -fno-warn-unused-binds
                         -fno-warn-name-shadowing
+
+test-suite test
+  default-language:     Haskell2010
+  type:                 exitcode-stdio-1.0
+  hs-source-dirs:       testsuite
+  main-is:              Test.hs
+  build-depends:        base == 4.7.*
+                      , tasty == 0.10.*
