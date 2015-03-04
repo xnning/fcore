@@ -17,6 +17,8 @@ module Panic
 
   , panic, sorry
   , prettyPanic, prettySorry
+  , notImplemented
+
   , panicOnSameDataCons
   ) where
 
@@ -70,6 +72,9 @@ sorry s = throwF2jException (Sorry s Nothing)
 prettyPanic, prettySorry :: String -> Doc -> a
 prettyPanic s doc = throwF2jException (Panic s (Just doc))
 prettySorry s doc = throwF2jException (Sorry s (Just doc))
+
+notImplemented :: String -> a
+notImplemented location = sorry ("Not implemented: " ++ location)
 
 panicOnSameDataCons :: (Data a, Data b) => result -> (String, a, b) -> result
 result `panicOnSameDataCons` (panic_msg, t1, t2)

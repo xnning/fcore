@@ -89,7 +89,7 @@ joinExpr (JMethod jc m es cn) =
   JMethod (fmap joinExpr jc) m (map joinExpr es) cn
 joinExpr (JField jc fn cn) = JField (fmap joinExpr jc) fn cn
 joinExpr (Seq es) = Seq (map joinExpr es)
-joinExpr _ = sorry "Not implemented yet"
+joinExpr _ = notImplemented "OptiUtils.joinExpr"
 
 mapExpr :: (Expr t e -> Expr t e) -> Expr t e -> Expr t e
 mapExpr f e =
@@ -120,7 +120,7 @@ mapExpr f e =
       Case e alts -> Case (f e) (map mapAlt alts)
          where mapAlt (ConstrAlt ctr vars g) = ConstrAlt ctr vars (f.g)
       Seq es -> Seq $ map f es
-      _ -> sorry "Not implemented yet"
+      _ -> notImplemented "OptiUtils.mapExpr"
 
 rewriteExpr :: (Int -> Map.Map Int e -> Expr t Int -> Expr t e) -> Int -> Map.Map Int e -> Expr t Int -> Expr t e
 rewriteExpr f num env expr =
