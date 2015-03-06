@@ -1,26 +1,29 @@
 # F2J Language Cheatsheet
 
-Quick reference of language syntax
+Quick reference for language syntax
+
+Audience: those who knows the language already and needs a reference for the
+syntax
 
 ## Types
 
-Type varibale names start with upper case letters.
+Both types and type varibale names start with upper case letters.
 
 Predefined types: `Int`, `String`, `Bool`, `Char`, `Float`, `Double`
 
-They corresponds to Java classes with similar names. For example, `Int`
-corresponds to `java.lang.Integer`. So you may call Java methods like:
+Under the hood, they are just Java classes with similar names. For example,
+`Int` corresponds to `java.lang.Integer`. So you may call Java methods like:
 `1.toString()`.
 
 Function types: `Int -> String`
 
-Product types: `(String, Int)`
+Product types: `(String, Int)`; there should be at least two items.
 
 Universal quantification: `forall A B. A -> B -> A`
 
 Note that one `forall` can lead multiple type parameters as long as they are distinct.
 
-Parameterized types (operator application): `ExprAlg[String]`, `Function1[A,B]`
+Using parameterized types (operator application): `ExprAlg[String]`, `Function1[A,B]`
 
 Intersection types: `Int & Bool`
 
@@ -28,7 +31,7 @@ Record types: `{name:String, age:Int}`
 
 ## Expressions
 
-Variable names start with lower case letters.
+Values and variable names start with lower case letters.
 
 Boolean literals: `True`, `False`
 
@@ -36,7 +39,7 @@ Lambdas: `\(x: Int) (y: Int) -> x + y`
 
 Type lambdas: `/\A -> \(x: A) -> x`
 
-Function application: `f x`
+Function application: `add 1 2`, `f (g x)`
 
 Let expressions: `let const[A,B] (x: A) (y: B) = x; const[Int,String] 1`
 
@@ -49,6 +52,8 @@ If: `if x == 0 then 1 else fact n * this (n - 1)`
 * `if`'s are expressions.
 * There is no need to wrap the predicate `x == 0` with parenthesis.
 * The `then` keyword is mandatory.
+* The type of the whole expression takes the *least upper bound* of the type of
+  the two branches.
 
 Note that there must be a body, lead by a semicolon, following the bindings.
 
@@ -59,6 +64,8 @@ There should be at least two items. Otherwise `(1)` just means `1`.
 Tuple projection: `(1,2,3)._1` (index starts with 1, just like in Scala)
 
 Tuple projection is type-safe: `(1,2)._3` won't compile.
+
+Tuple projection for nested tuples is also ok: `(1,2,(3,4))._3._2` evaluates to `4`.
 
 Merge of two values: `1 ,, "hi"`
 

@@ -4,6 +4,12 @@ F2J is a research programming language (as well as its compiler) that compiles
 to Java. It supports functional programming styles, interoperability with Java,
 and intersection types.
 
+This document assumes the reader is familiar with:
+
+* algebraic data types and pattern matching
+* parametric polymorphism
+
+
 ## Core Language
 
 ### First Example

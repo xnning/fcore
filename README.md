@@ -1,6 +1,8 @@
 # F2J: A Compiler for FCore
 [![Build Status](https://travis-ci.org/hkuplg/fcore.svg?branch=develop)](https://travis-ci.org/hkuplg/fcore)
 
+**This project is under development.**
+
 ## Building from Source
 
 The following instructions should work on any platform, from OS X to
