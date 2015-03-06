@@ -1,0 +1,4 @@
+--> 2001
+
+let const[A,B] (x: A) (y: B) = x;
+const[Int,String] 2001 "MMI"

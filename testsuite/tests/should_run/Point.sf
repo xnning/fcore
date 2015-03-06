@@ -1,0 +1,5 @@
+--> 2
+
+type Point = {x: Int, y: Int}
+let getX (p: Point) = p.x;
+getX {z = 3, x = 2, y = 1}
